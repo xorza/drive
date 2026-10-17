@@ -3,8 +3,9 @@ use std::path::{Path, PathBuf};
 use crate::error::Result;
 use crate::root::Root;
 
-/// The root the driver sits in, then each root nested in it through a git submodule that a
-/// member depends on by path: a change there reaches the top root's builds.
+/// The root the driver sits in, then the workspace of each path dependency outside it, and so
+/// on: each is a root of its own, checked in its own folder, and a change there reaches the
+/// builds of the roots that depend on it.
 #[derive(Debug)]
 pub(crate) struct Project {
     roots: Vec<Root>,
@@ -15,20 +16,27 @@ impl Project {
         let mut roots = vec![Root::load(top, String::new())?];
         let mut next = 0;
         while next < roots.len() {
-            let found: Vec<PathBuf> = roots[next]
-                .submodules()
-                .into_iter()
-                .filter(|sub| roots[next].depends_on(sub) && sub.join("Cargo.toml").is_file())
-                .filter(|sub| roots.iter().all(|r| &r.dir != sub))
+            let outside: Vec<PathBuf> = roots[next]
+                .members
+                .iter()
+                .flat_map(|m| m.outside.clone())
                 .collect();
-            for sub in found {
-                let rel = sub.strip_prefix(top).unwrap_or(&sub);
-                let label = rel
-                    .components()
-                    .map(|c| c.as_os_str().to_string_lossy())
-                    .collect::<Vec<_>>()
-                    .join("/");
-                roots.push(Root::load(&sub, label)?);
+            for dir in outside {
+                if roots.iter().any(|r| r.holds(&dir)) {
+                    continue;
+                }
+                let found = Root::workspace_of(&dir)?;
+                if roots.iter().all(|r| r.dir != found) {
+                    let label = found
+                        .strip_prefix(top)
+                        .unwrap_or_else(|_| Path::new(found.file_name().unwrap_or_default()));
+                    let label = label
+                        .components()
+                        .map(|c| c.as_os_str().to_string_lossy())
+                        .collect::<Vec<_>>()
+                        .join("/");
+                    roots.push(Root::load(&found, label)?);
+                }
             }
             next += 1;
         }

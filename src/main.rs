@@ -5,8 +5,8 @@
 //! driver owns every cargo command, and each lane is one shape over the whole workspace, so an
 //! edit rebuilds each crate it reaches once. What a check narrows is what it runs: a step does
 //! not run again when no input changed since it passed, and the tests run only for the crates a
-//! change reaches. A git submodule a member depends on by path is a root of its own, checked in
-//! its own folder.
+//! change reaches. The workspace of a path dependency outside the workspace, such as a git
+//! submodule, is a root of its own, checked in its own folder.
 //!
 //! A project holds this crate as a git submodule at its workspace root, outside its workspace,
 //! and names it in `.cargo/config.toml`: `drive = "run -q --locked --manifest-path
@@ -34,14 +34,16 @@ mod runner;
 mod step;
 mod tool;
 
+use std::collections::BTreeSet;
 use std::path::Path;
 use std::process::ExitCode;
 
 use crate::cli::Task;
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::lanes::Lane;
 use crate::output::Ci;
 use crate::project::Project;
+use crate::root::Root;
 use crate::runner::{Plan, Reuse, Runner};
 use crate::step::{Format, Runs, Step};
 
@@ -76,29 +78,8 @@ fn run(task: &Task) -> Result<ExitCode> {
     let project = Project::load(top)?;
     let root = project.top();
     match task {
-        Task::Check | Task::Gate => {
-            let (name, format) = if *task == Task::Check {
-                ("check", Format::Write)
-            } else {
-                ("gate", Format::Check)
-            };
-            let plans: Vec<Plan<'_>> = project
-                .roots()
-                .iter()
-                .map(|r| {
-                    let lanes = if *task == Task::Check {
-                        &r.lanes.check
-                    } else {
-                        &r.lanes.gate
-                    };
-                    Plan {
-                        root: r,
-                        steps: Step::every(r, lanes, format),
-                    }
-                })
-                .collect();
-            Runner::new(&project, name, ci, Reuse::Passes)?.run(&plans)
-        }
+        Task::Check => every_root(&project, ci, "check", Format::Write, |r| &r.lanes.check),
+        Task::Gate => every_root(&project, ci, "gate", Format::Check, |r| &r.lanes.gate),
         Task::Test(args) => {
             let mut steps = Step::tests(root, args, Runs::Always);
             // nextest's arguments select no doc test; a whole run keeps its pass for the checks,
@@ -115,14 +96,32 @@ fn run(task: &Task) -> Result<ExitCode> {
             Runner::new(&project, "test", ci, reuse)?.run(&[Plan { root, steps }])
         }
         Task::Bench(args) => {
-            let Some(step) = Step::bench(root, args) else {
-                eprintln!("error: no member of {} has a bench", root.dir.display());
-                return Ok(ExitCode::from(2));
-            };
+            let step = Step::bench(root, args).ok_or_else(|| Error::NoBenches {
+                dir: root.dir.clone(),
+            })?;
             Runner::new(&project, "bench", ci, Reuse::Never)?.run(&[Plan {
                 root,
                 steps: vec![step],
             }])
         }
     }
+}
+
+/// The lanes `pick` chooses, on every root of the project.
+fn every_root(
+    project: &Project,
+    ci: Ci,
+    command: &'static str,
+    format: Format,
+    pick: impl Fn(&Root) -> &BTreeSet<Lane>,
+) -> Result<ExitCode> {
+    let plans: Vec<Plan<'_>> = project
+        .roots()
+        .iter()
+        .map(|r| Plan {
+            root: r,
+            steps: Step::every(r, pick(r), format),
+        })
+        .collect();
+    Runner::new(project, command, ci, Reuse::Passes)?.run(&plans)
 }

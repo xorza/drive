@@ -28,6 +28,9 @@ pub(crate) enum Error {
         path: PathBuf,
         source: io::Error,
     },
+    NoBenches {
+        dir: PathBuf,
+    },
 }
 
 /// What is wrong with a root's `drive` table.
@@ -75,6 +78,7 @@ impl fmt::Display for Error {
             }
             Self::Config { manifest, reason } => write!(f, "{}: {reason}", manifest.display()),
             Self::Io { path, source } => write!(f, "{}: {source}", path.display()),
+            Self::NoBenches { dir } => write!(f, "no member of {} has a bench", dir.display()),
         }
     }
 }

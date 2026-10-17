@@ -43,6 +43,9 @@ pub(crate) struct Runner<'p> {
     outcomes: Vec<Outcome>,
     rustc: Option<String>,
     nextest: Option<String>,
+    /// Each repository's tree, as it stands since the last step that ran: a step that runs can
+    /// write files, as `fmt` does.
+    trees: BTreeMap<PathBuf, String>,
 }
 
 impl<'p> Runner<'p> {
@@ -68,6 +71,7 @@ impl<'p> Runner<'p> {
             outcomes: Vec::new(),
             rustc: None,
             nextest: None,
+            trees: BTreeMap::new(),
         })
     }
 
@@ -84,7 +88,6 @@ impl<'p> Runner<'p> {
                 let outcome = match &broken {
                     Some(by) if step.kind != Kind::Format => Outcome::skipped(
                         &step.name,
-                        Status::Skip,
                         format!("{by} found code that does not compile"),
                     ),
                     _ => self.step(plan.root, step)?,
@@ -191,7 +194,7 @@ impl<'p> Runner<'p> {
             .as_mut()
             .expect("reuse needs passes")
             .keep(key, snapshot)?;
-        Ok(Outcome::skipped(&step.name, Status::Ok, note.to_owned()))
+        Ok(Outcome::reused(&step.name, note.to_owned()))
     }
 
     fn execute(&mut self, root: &Root, step: &Step, note: &str) -> Result<Outcome> {
@@ -211,6 +214,7 @@ impl<'p> Runner<'p> {
         if self.ci == Ci::GitHub {
             println!("::group::{}", step.name);
         }
+        self.trees.clear();
         let started = Instant::now();
         let log_name = log.display().to_string();
         let report = output::run(
@@ -266,7 +270,7 @@ impl<'p> Runner<'p> {
     }
 
     /// The trees of the repositories `root`'s steps read; `None` outside git.
-    fn snapshot(&self, root: &Root) -> Result<Option<Snapshot>> {
+    fn snapshot(&mut self, root: &Root) -> Result<Option<Snapshot>> {
         let scratch = self.own.join(format!("tree-index-{}", std::process::id()));
         let mut snapshot = Snapshot::new();
         for each in std::iter::once(root).chain(self.project.outside(root)) {
@@ -276,10 +280,13 @@ impl<'p> Runner<'p> {
             if snapshot.contains_key(&repo.top) {
                 continue;
             }
-            let Some(tree) = repo.tree(&scratch)? else {
-                return Ok(None);
-            };
-            snapshot.insert(repo.top.clone(), tree);
+            if !self.trees.contains_key(&repo.top) {
+                let Some(tree) = repo.tree(&scratch)? else {
+                    return Ok(None);
+                };
+                self.trees.insert(repo.top.clone(), tree);
+            }
+            snapshot.insert(repo.top.clone(), self.trees[&repo.top].clone());
         }
         Ok(Some(snapshot))
     }

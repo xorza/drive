@@ -1,6 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use crate::error::{Error, Result};
 use crate::git::Repo;
@@ -138,15 +137,24 @@ impl Root {
         let mut owners = BTreeSet::new();
         let mut input = false;
         for path in paths {
-            if let Some(nested) = outside.iter().find(|o| path.starts_with(&o.dir)) {
+            let nested = outside
+                .iter()
+                .filter(|o| path.starts_with(&o.dir))
+                .max_by_key(|o| o.dir.components().count());
+            if let Some(nested) = nested {
                 if nested.is_input(path) {
                     input = true;
-                    owners.extend(
-                        self.members
-                            .iter()
-                            .filter(|m| m.outside.iter().any(|d| d.starts_with(&nested.dir)))
-                            .map(|m| m.name.clone()),
-                    );
+                    let direct: Vec<&Member> = self
+                        .members
+                        .iter()
+                        .filter(|m| m.outside.iter().any(|d| d.starts_with(&nested.dir)))
+                        .collect();
+                    // A root reached only through another root: which members it reaches is that
+                    // root's to tell.
+                    if direct.is_empty() {
+                        return Some(Reach::All);
+                    }
+                    owners.extend(direct.iter().map(|m| m.name.clone()));
                 }
                 continue;
             }
@@ -203,26 +211,21 @@ impl Root {
         !hidden && !driver && file != "AGENTS.md" && file != "CLAUDE.md"
     }
 
-    pub(crate) fn submodules(&self) -> Vec<PathBuf> {
-        if !self.dir.join(".gitmodules").is_file() {
-            return Vec::new();
-        }
-        let out = Command::new("git")
-            .args([
-                "config",
-                "--file",
-                ".gitmodules",
-                "--get-regexp",
-                r"^submodule\..*\.path$",
-            ])
-            .current_dir(&self.dir)
-            .output();
-        let Ok(out) = out else { return Vec::new() };
-        let text = String::from_utf8_lossy(&out.stdout);
-        text.lines()
-            .filter_map(|l| l.split_once(' '))
-            .map(|(_, p)| self.dir.join(p))
-            .collect()
+    /// The folder of the workspace that holds the package in `dir`.
+    pub(crate) fn workspace_of(dir: &Path) -> Result<PathBuf> {
+        let mut cargo = tool::cargo();
+        cargo.args(["locate-project", "--workspace", "--message-format", "plain"]);
+        let manifest = tool::stdout(&mut cargo, dir)?;
+        let manifest = Path::new(manifest.trim());
+        Ok(manifest
+            .parent()
+            .expect("a manifest path names a file")
+            .to_owned())
+    }
+
+    /// Whether a member's folder holds `dir`.
+    pub(crate) fn holds(&self, dir: &Path) -> bool {
+        self.members.iter().any(|m| dir.starts_with(&m.dir))
     }
 
     /// Whether a member depends by path on a crate in `dir`.
@@ -328,6 +331,8 @@ mod tests {
         );
         assert_eq!(root.members[1].outside, [PathBuf::from("/w/gui")]);
         assert!(root.depends_on(Path::new("/w/gui")));
+        assert!(root.holds(Path::new("/w/core/src")));
+        assert!(!root.holds(Path::new("/w/gui")));
         assert!(!root.depends_on(Path::new("/w/other")));
         assert_eq!(root.step_name("lint"), "lint");
     }
@@ -394,5 +399,21 @@ mod tests {
             Some(members(&["app"]))
         );
         assert_eq!(reach(&root, &["/w/gui/AGENTS.md"], &[&gui]), None);
+        // A root inside gui, which the root reaches only through gui: the inner one holds the
+        // file, whichever comes first.
+        let mut theme = Root::fixture();
+        theme.dir = PathBuf::from("/w/gui/theme");
+        assert_eq!(
+            reach(&root, &["/w/gui/theme/src/lib.rs"], &[&gui, &theme]),
+            Some(Reach::All)
+        );
+        assert_eq!(
+            reach(&root, &["/w/gui/theme/src/lib.rs"], &[&theme, &gui]),
+            Some(Reach::All)
+        );
+        assert_eq!(
+            reach(&root, &["/w/gui/src/lib.rs"], &[&theme, &gui]),
+            Some(members(&["app"]))
+        );
     }
 }
