@@ -184,8 +184,8 @@ impl Root {
     }
 
     /// Whether a file is one the builds and tests read: not in a hidden folder but `.cargo` and
-    /// `.config`, which hold cargo's and nextest's settings, not in this driver's submodule, and
-    /// no agent's instructions.
+    /// `.config`, which hold cargo's and nextest's settings, not in this driver's submodule, no
+    /// file of git's own, and no agent's instructions.
     fn is_input(&self, path: &Path) -> bool {
         let Ok(rel) = path.strip_prefix(&self.dir) else {
             return false;
@@ -208,7 +208,9 @@ impl Root {
                 .members
                 .iter()
                 .any(|m| m.dir.starts_with(self.dir.join(DRIVER)));
-        !hidden && !driver && file != "AGENTS.md" && file != "CLAUDE.md"
+        // Git's own files: a change to what git tracks shows as the files it adds or drops.
+        let git = file.starts_with(".git");
+        !hidden && !driver && !git && file != "AGENTS.md" && file != "CLAUDE.md"
     }
 
     /// The folder of the workspace that holds the package in `dir`.
@@ -375,6 +377,8 @@ mod tests {
                 &root,
                 &[
                     "/w/drive",
+                    "/w/.gitmodules",
+                    "/w/core/.gitignore",
                     "/w/drive/src/main.rs",
                     "/w/.notes/ISSUES.md",
                     "/w/core/.zed/x",
