@@ -45,7 +45,8 @@ pub(crate) struct Report {
     /// The exit code, `None` when a signal ended the process.
     pub(crate) code: Option<i32>,
     pub(crate) printed: usize,
-    pub(crate) built: usize,
+    /// The crates cargo compiled rather than found fresh, once for each unit.
+    pub(crate) compiled: Vec<String>,
     pub(crate) errors: usize,
     /// Errors that are no lint: the code does not compile.
     pub(crate) hard: usize,
@@ -129,8 +130,10 @@ impl<'s, W: Write> Filter<'s, W> {
         writeln!(self.log, "{line}").ok();
         let trimmed = line.trim_start();
         let first = trimmed.split_whitespace().next().unwrap_or("");
-        if matches!(first, "Compiling" | "Checking" | "Documenting") {
-            self.report.built += 1;
+        if matches!(first, "Compiling" | "Checking" | "Documenting")
+            && let Some(name) = trimmed.split_whitespace().nth(1)
+        {
+            self.report.compiled.push(name.to_owned());
         }
         if self.kind.diagnoses()
             && trimmed.starts_with("= note: `cargo::")
@@ -274,7 +277,7 @@ fn is_hidden(line: &str, kind: Kind) -> bool {
         && (trimmed.starts_with("Doc-tests ")
             || trimmed.starts_with("running ")
             || (trimmed.starts_with("test ")
-                && (trimmed.ends_with(" ... ok") || trimmed.ends_with(" ... ignored")))
+                && (trimmed.ends_with(" ... ok") || trimmed.contains(" ... ignored")))
             || trimmed.starts_with("test result: ok.")
             || trimmed.starts_with("all doctests ran in "));
     progress || nextest || tally || libtest
@@ -409,7 +412,7 @@ mod tests {
             Report {
                 code: None,
                 printed: 2,
-                built: 2,
+                compiled: vec!["a".to_owned(), "b".to_owned()],
                 errors: 2,
                 hard: 1,
                 repeated: 0,
@@ -474,6 +477,8 @@ mod tests {
         assert!(!is_hidden("test a ... ok", Kind::Nextest));
         assert!(is_hidden("test a ... ok", Kind::Doctests));
         assert!(is_hidden("test a ... ok", Kind::CargoTest));
+        assert!(is_hidden("test a ... ignored, print-only", Kind::CargoTest));
+        assert!(!is_hidden("test a ... FAILED", Kind::CargoTest));
         assert_eq!(test_summary([0, 0, 0, 0]), "0 passed");
         assert_eq!(
             test_summary([3, 0, 1, 4]),

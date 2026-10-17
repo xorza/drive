@@ -1,9 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs::{File, OpenOptions};
-use std::io::Write;
+use std::fs::File;
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitCode};
-use std::time::{Instant, SystemTime};
+use std::process::Command;
+use std::time::{Duration, Instant};
 
 use crate::error::{Error, Result};
 use crate::git::Repo;
@@ -22,6 +21,21 @@ pub(crate) enum Reuse {
     Never,
 }
 
+/// How a command's steps came out.
+#[derive(Debug)]
+pub(crate) struct Finished {
+    pub(crate) outcomes: Vec<Outcome>,
+    /// A driver error that ended the command before its last step; the steps before it stay.
+    pub(crate) error: Option<Error>,
+}
+
+impl Finished {
+    /// Every step passed or was reused, and no driver error ended the command.
+    pub(crate) fn passed(&self) -> bool {
+        self.error.is_none() && self.outcomes.iter().all(|o| o.status == Status::Ok)
+    }
+}
+
 /// The steps of one root, in order.
 #[derive(Debug)]
 pub(crate) struct Plan<'p> {
@@ -34,9 +48,8 @@ pub(crate) struct Plan<'p> {
 #[derive(Debug)]
 pub(crate) struct Runner<'p> {
     project: &'p Project,
-    command: &'static str,
     ci: Ci,
-    /// `<top target>/drive`: logs, passes, history and scratch.
+    /// `<top target>/drive`: logs, passes and scratch.
     own: PathBuf,
     passes: Option<Passes>,
     shown: BTreeSet<String>,
@@ -49,12 +62,7 @@ pub(crate) struct Runner<'p> {
 }
 
 impl<'p> Runner<'p> {
-    pub(crate) fn new(
-        project: &'p Project,
-        command: &'static str,
-        ci: Ci,
-        reuse: Reuse,
-    ) -> Result<Self> {
+    pub(crate) fn new(project: &'p Project, ci: Ci, reuse: Reuse) -> Result<Self> {
         let own = project.top().target_dir.join("drive");
         let logs = own.join("log");
         std::fs::create_dir_all(&logs).map_err(|source| Error::Io { path: logs, source })?;
@@ -63,7 +71,6 @@ impl<'p> Runner<'p> {
             (reuse == Reuse::Passes && ci == Ci::No).then(|| Passes::load(own.join("passes.json")));
         Ok(Self {
             project,
-            command,
             ci,
             own,
             passes,
@@ -75,14 +82,15 @@ impl<'p> Runner<'p> {
         })
     }
 
-    pub(crate) fn run(mut self, plans: &[Plan<'_>]) -> Result<ExitCode> {
+    pub(crate) fn run(mut self, plans: &[Plan<'_>]) -> Finished {
         let width = plans
             .iter()
             .flat_map(|p| &p.steps)
             .map(|s| s.name.len())
             .max()
             .unwrap_or(0);
-        for plan in plans {
+        let mut error = None;
+        'plans: for plan in plans {
             let mut broken: Option<String> = None;
             for step in &plan.steps {
                 let outcome = match &broken {
@@ -90,13 +98,25 @@ impl<'p> Runner<'p> {
                         &step.name,
                         format!("{by} found code that does not compile"),
                     ),
-                    _ => self.step(plan.root, step)?,
+                    _ => {
+                        let started = Instant::now();
+                        match self.step(plan.root, step) {
+                            Ok(mut outcome) => {
+                                outcome.overhead =
+                                    started.elapsed().saturating_sub(outcome.elapsed);
+                                outcome
+                            }
+                            Err(stopped) => {
+                                error = Some(stopped);
+                                break 'plans;
+                            }
+                        }
+                    }
                 };
                 if outcome.broken && broken.is_none() {
                     broken = Some(outcome.name.clone());
                 }
                 println!("{}", outcome.line(width));
-                self.record(&outcome)?;
                 self.outcomes.push(outcome);
             }
         }
@@ -108,12 +128,10 @@ impl<'p> Runner<'p> {
                 println!("{}", outcome.line(width));
             }
         }
-        let ok = self.outcomes.iter().all(|o| o.status == Status::Ok);
-        Ok(if ok {
-            ExitCode::SUCCESS
-        } else {
-            ExitCode::FAILURE
-        })
+        Finished {
+            outcomes: self.outcomes,
+            error,
+        }
     }
 
     /// A step runs only as its passes allow: not when no input changed since it passed, and a
@@ -262,7 +280,10 @@ impl<'p> Runner<'p> {
             elapsed,
             log: Some(log),
             printed: report.printed,
-            built: report.built,
+            overhead: Duration::ZERO,
+            errors: report.errors,
+            summary: report.summary,
+            compiled: report.compiled,
             note: notes.join("; "),
             broken,
             reused: false,
@@ -330,36 +351,6 @@ impl<'p> Runner<'p> {
         env.extend(step.env.iter().cloned());
         let identity = serde_json::json!([root.dir, step.name, step.argv, env, tools]);
         identity.to_string()
-    }
-
-    /// One JSON line for each step, so the checks' times are measured, not assumed.
-    fn record(&self, outcome: &Outcome) -> Result<()> {
-        let at = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        let entry = serde_json::json!({
-            "at": at,
-            "command": self.command,
-            "pid": std::process::id(),
-            "step": outcome.name,
-            "status": outcome.status.name(),
-            "seconds": (outcome.elapsed.as_secs_f64() * 10.0).round() / 10.0,
-            "built": outcome.built,
-            "reused": outcome.reused,
-            "note": outcome.note,
-        });
-        let path = self.own.join("history.jsonl");
-        let io = |source| Error::Io {
-            path: path.clone(),
-            source,
-        };
-        let mut file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-            .map_err(io)?;
-        writeln!(file, "{entry}").map_err(io)
     }
 }
 

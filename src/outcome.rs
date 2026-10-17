@@ -27,8 +27,13 @@ pub(crate) struct Outcome {
     pub(crate) log: Option<PathBuf>,
     /// The lines it printed above its own.
     pub(crate) printed: usize,
-    /// The units cargo built rather than found fresh.
-    pub(crate) built: usize,
+    /// The time the driver spent around the step: git's trees, the step's identity, its pass.
+    pub(crate) overhead: Duration,
+    /// The crates cargo compiled rather than found fresh, once for each unit.
+    pub(crate) compiled: Vec<String>,
+    pub(crate) errors: usize,
+    /// Nextest's or libtest's count of the tests.
+    pub(crate) summary: String,
     pub(crate) note: String,
     /// It found code that does not compile, so no later step of its root builds.
     pub(crate) broken: bool,
@@ -57,7 +62,10 @@ impl Outcome {
             elapsed: Duration::ZERO,
             log: None,
             printed: 0,
-            built: 0,
+            overhead: Duration::ZERO,
+            compiled: Vec::new(),
+            errors: 0,
+            summary: String::new(),
             note,
             broken: false,
             reused: false,

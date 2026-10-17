@@ -18,6 +18,22 @@ impl Task {
         Self::from_matches(&command().get_matches())
     }
 
+    pub(crate) const fn name(&self) -> &'static str {
+        match self {
+            Self::Check => "check",
+            Self::Test(_) => "test",
+            Self::Bench(_) => "bench",
+            Self::Gate => "gate",
+        }
+    }
+
+    pub(crate) fn args(&self) -> &[String] {
+        match self {
+            Self::Test(args) | Self::Bench(args) => args,
+            Self::Check | Self::Gate => &[],
+        }
+    }
+
     fn from_matches(matches: &ArgMatches) -> Self {
         let (name, sub) = matches.subcommand().expect("a subcommand is required");
         let args = || {
@@ -84,6 +100,12 @@ mod tests {
     #[test]
     fn passes_arguments_through() {
         assert_eq!(parse(&["drive", "check"]), Task::Check);
+        assert_eq!((Task::Gate.name(), Task::Gate.args()), ("gate", &[][..]));
+        let bench = parse(&["drive", "bench", "--test"]);
+        assert_eq!(
+            (bench.name(), bench.args()),
+            ("bench", &["--test".to_owned()][..])
+        );
         assert_eq!(parse(&["drive", "gate"]), Task::Gate);
         assert_eq!(parse(&["drive", "test"]), Task::Test(Vec::new()));
         assert_eq!(
