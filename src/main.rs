@@ -45,15 +45,15 @@ use std::collections::BTreeSet;
 use std::path::Path;
 use std::process::ExitCode;
 
-use crate::cli::Task;
+use crate::cli::{Mode, Task};
 use crate::error::{Error, Result};
 use crate::journal::{End, Journal};
 use crate::lanes::Lane;
 use crate::output::Ci;
 use crate::project::Project;
 use crate::root::Root;
-use crate::runner::{Finished, Plan, Reuse, Runner};
-use crate::step::{Format, Runs, Step};
+use crate::runner::{Finished, OnFail, Plan, Reuse, Runner};
+use crate::step::{Runs, Step};
 
 fn main() -> ExitCode {
     let task = Task::parse();
@@ -62,7 +62,7 @@ fn main() -> ExitCode {
     } else {
         Ci::No
     };
-    let mut journal = Journal::start(task.name(), task.args(), ci);
+    let mut journal = Journal::start(task.name(), &task.args(), ci);
     let top = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .expect("the driver sits in its root");
@@ -104,12 +104,17 @@ fn run(task: &Task, top: &Path, ci: Ci, journal: &mut Journal) -> Result<Finishe
             );
         }
     }
+    if ci == Ci::GitHub && task.mode() == Some(Mode::Local) {
+        return Err(Error::LocalInCi {
+            command: task.name(),
+        });
+    }
     let project = Project::load(top)?;
     journal.loaded();
     let root = project.top();
     match task {
-        Task::Check => every_root(&project, ci, Format::Write, |r| &r.lanes.check),
-        Task::Gate => every_root(&project, ci, Format::Check, |r| &r.lanes.gate),
+        Task::Check => every_root(&project, ci, Mode::Local, |r| &r.lanes.check),
+        Task::Gate(mode) => every_root(&project, ci, *mode, |r| &r.lanes.gate),
         Task::Test(args) => {
             let mut steps = Step::tests(root, args, Runs::Always);
             // nextest's arguments select no doc test; a whole run keeps its pass for the checks,
@@ -123,16 +128,19 @@ fn run(task: &Task, top: &Path, ci: Ci, journal: &mut Journal) -> Result<Finishe
             } else {
                 Reuse::Never
             };
-            Ok(Runner::new(&project, ci, reuse)?.run(&[Plan { root, steps }]))
+            Ok(Runner::new(&project, ci, reuse)?.run(&[Plan { root, steps }], OnFail::Continue))
         }
         Task::Bench(args) => {
             let step = Step::bench(root, args).ok_or_else(|| Error::NoBenches {
                 dir: root.dir.clone(),
             })?;
-            Ok(Runner::new(&project, ci, Reuse::Never)?.run(&[Plan {
-                root,
-                steps: vec![step],
-            }]))
+            Ok(Runner::new(&project, ci, Reuse::Never)?.run(
+                &[Plan {
+                    root,
+                    steps: vec![step],
+                }],
+                OnFail::Continue,
+            ))
         }
     }
 }
@@ -141,7 +149,7 @@ fn run(task: &Task, top: &Path, ci: Ci, journal: &mut Journal) -> Result<Finishe
 fn every_root(
     project: &Project,
     ci: Ci,
-    format: Format,
+    mode: Mode,
     pick: impl Fn(&Root) -> &BTreeSet<Lane>,
 ) -> Result<Finished> {
     let plans: Vec<Plan<'_>> = project
@@ -149,8 +157,8 @@ fn every_root(
         .iter()
         .map(|r| Plan {
             root: r,
-            steps: Step::every(r, pick(r), format),
+            steps: Step::every(r, pick(r), mode.format()),
         })
         .collect();
-    Ok(Runner::new(project, ci, Reuse::Passes)?.run(&plans))
+    Ok(Runner::new(project, ci, Reuse::Passes)?.run(&plans, mode.on_fail()))
 }

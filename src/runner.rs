@@ -21,6 +21,59 @@ pub(crate) enum Reuse {
     Never,
 }
 
+/// Whether a failed step ends the command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OnFail {
+    /// Every later step is skipped, on every root.
+    Stop,
+    /// Later steps run, but a root's builds stop at code that does not compile.
+    Continue,
+}
+
+/// Why the next step does not run.
+#[derive(Debug)]
+struct Stops {
+    on_fail: OnFail,
+    /// The first step that failed, under [`OnFail::Stop`].
+    failed: Option<String>,
+    /// The first step of the current root that found code that does not compile.
+    broken: Option<String>,
+}
+
+impl Stops {
+    const fn new(on_fail: OnFail) -> Self {
+        Self {
+            on_fail,
+            failed: None,
+            broken: None,
+        }
+    }
+
+    fn next_root(&mut self) {
+        self.broken = None;
+    }
+
+    /// `None` when a step of `kind` runs: `fmt` builds nothing, so only a failure stops it.
+    fn reason(&self, kind: Kind) -> Option<String> {
+        match (&self.failed, &self.broken) {
+            (Some(by), _) => Some(format!("{by} failed")),
+            (None, Some(by)) if kind != Kind::Format => {
+                Some(format!("{by} found code that does not compile"))
+            }
+            _ => None,
+        }
+    }
+
+    fn record(&mut self, outcome: &Outcome) {
+        if outcome.broken && self.broken.is_none() {
+            self.broken = Some(outcome.name.clone());
+        }
+        if self.on_fail == OnFail::Stop && outcome.status == Status::Fail && self.failed.is_none() {
+            self.failed = Some(outcome.name.clone());
+        }
+    }
+}
+
 /// How a command's steps came out.
 #[derive(Debug)]
 pub(crate) struct Finished {
@@ -43,8 +96,7 @@ pub(crate) struct Plan<'p> {
     pub(crate) steps: Vec<Step>,
 }
 
-/// Runs a command's steps, each after the one before it and past failures: once a step finds
-/// code that does not compile, no later step of its root builds.
+/// Runs a command's steps, each after the one before it, as its [`OnFail`] allows.
 #[derive(Debug)]
 pub(crate) struct Runner<'p> {
     project: &'p Project,
@@ -82,7 +134,7 @@ impl<'p> Runner<'p> {
         })
     }
 
-    pub(crate) fn run(mut self, plans: &[Plan<'_>]) -> Finished {
+    pub(crate) fn run(mut self, plans: &[Plan<'_>], on_fail: OnFail) -> Finished {
         let width = plans
             .iter()
             .flat_map(|p| &p.steps)
@@ -90,32 +142,26 @@ impl<'p> Runner<'p> {
             .max()
             .unwrap_or(0);
         let mut error = None;
+        let mut stops = Stops::new(on_fail);
         'plans: for plan in plans {
-            let mut broken: Option<String> = None;
+            stops.next_root();
             for step in &plan.steps {
-                let outcome = match &broken {
-                    Some(by) if step.kind != Kind::Format => Outcome::skipped(
-                        &step.name,
-                        format!("{by} found code that does not compile"),
-                    ),
-                    _ => {
-                        let started = Instant::now();
-                        match self.step(plan.root, step) {
-                            Ok(mut outcome) => {
-                                outcome.overhead =
-                                    started.elapsed().saturating_sub(outcome.elapsed);
-                                outcome
-                            }
-                            Err(stopped) => {
-                                error = Some(stopped);
-                                break 'plans;
-                            }
+                let outcome = if let Some(reason) = stops.reason(step.kind) {
+                    Outcome::skipped(&step.name, reason)
+                } else {
+                    let started = Instant::now();
+                    match self.step(plan.root, step) {
+                        Ok(mut outcome) => {
+                            outcome.overhead = started.elapsed().saturating_sub(outcome.elapsed);
+                            outcome
+                        }
+                        Err(stopped) => {
+                            error = Some(stopped);
+                            break 'plans;
                         }
                     }
                 };
-                if outcome.broken && broken.is_none() {
-                    broken = Some(outcome.name.clone());
-                }
+                stops.record(&outcome);
                 println!("{}", outcome.line(width));
                 self.outcomes.push(outcome);
             }
@@ -364,4 +410,47 @@ fn version(command: &mut Command, dir: &Path) -> String {
             .to_owned()
     })
     .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ran(name: &str, status: Status, broken: bool) -> Outcome {
+        Outcome {
+            status,
+            broken,
+            ..Outcome::skipped(name, String::new())
+        }
+    }
+
+    #[test]
+    fn a_failure_stops_every_later_step_only_under_stop() {
+        let mut stop = Stops::new(OnFail::Stop);
+        let mut keep_on = Stops::new(OnFail::Continue);
+        for stops in [&mut stop, &mut keep_on] {
+            stops.record(&ran("fmt", Status::Ok, false));
+            assert_eq!(stops.reason(Kind::Check), None);
+            stops.record(&ran("lint", Status::Fail, false));
+            stops.record(&ran("ship", Status::Fail, false));
+            stops.next_root();
+        }
+        // The first failure names the stop, past the root it failed in, and stops `fmt` too.
+        assert_eq!(stop.reason(Kind::Format).as_deref(), Some("lint failed"));
+        assert_eq!(stop.reason(Kind::Nextest).as_deref(), Some("lint failed"));
+        assert_eq!(keep_on.reason(Kind::Format), None);
+        assert_eq!(keep_on.reason(Kind::Nextest), None);
+    }
+
+    #[test]
+    fn code_that_does_not_compile_stops_its_root_builds() {
+        let mut stops = Stops::new(OnFail::Continue);
+        stops.record(&ran("tests", Status::Fail, true));
+        stops.record(&ran("doctests", Status::Fail, true));
+        let broken = Some("tests found code that does not compile".to_owned());
+        assert_eq!(stops.reason(Kind::Doctests), broken);
+        assert_eq!(stops.reason(Kind::Format), None);
+        stops.next_root();
+        assert_eq!(stops.reason(Kind::Doctests), None);
+    }
 }

@@ -31,6 +31,10 @@ pub(crate) enum Error {
     NoBenches {
         dir: PathBuf,
     },
+    /// A command that formats the checkout and stops at the first failure, run in CI.
+    LocalInCi {
+        command: &'static str,
+    },
 }
 
 /// What is wrong with a root's `drive` table.
@@ -79,6 +83,11 @@ impl fmt::Display for Error {
             Self::Config { manifest, reason } => write!(f, "{}: {reason}", manifest.display()),
             Self::Io { path, source } => write!(f, "{}: {source}", path.display()),
             Self::NoBenches { dir } => write!(f, "no member of {} has a bench", dir.display()),
+            Self::LocalInCi { command } => write!(
+                f,
+                "`cargo drive {command}` formats the checkout and stops at the first failure; \
+                 CI runs `cargo drive gate --ci`"
+            ),
         }
     }
 }

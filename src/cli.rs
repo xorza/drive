@@ -1,4 +1,7 @@
-use clap::{Arg, ArgMatches, Command};
+use clap::{Arg, ArgAction, ArgMatches, Command};
+
+use crate::runner::OnFail;
+use crate::step::Format;
 
 /// One command of `cargo drive`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -9,8 +12,33 @@ pub(crate) enum Task {
     Test(Vec<String>),
     /// The benches, with the bench binaries' arguments.
     Bench(Vec<String>),
-    /// The root's `gate` lanes, which CI runs, with `fmt --check`.
-    Gate,
+    /// The root's `gate` lanes.
+    Gate(Mode),
+}
+
+/// Who runs `check` or `gate`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Mode {
+    /// An agent or a person, who wants the files formatted and the first failure soon.
+    Local,
+    /// CI, which can change no file and reports every failure of one run.
+    Ci,
+}
+
+impl Mode {
+    pub(crate) const fn format(self) -> Format {
+        match self {
+            Self::Local => Format::Write,
+            Self::Ci => Format::Check,
+        }
+    }
+
+    pub(crate) const fn on_fail(self) -> OnFail {
+        match self {
+            Self::Local => OnFail::Stop,
+            Self::Ci => OnFail::Continue,
+        }
+    }
 }
 
 impl Task {
@@ -23,14 +51,24 @@ impl Task {
             Self::Check => "check",
             Self::Test(_) => "test",
             Self::Bench(_) => "bench",
-            Self::Gate => "gate",
+            Self::Gate(_) => "gate",
         }
     }
 
-    pub(crate) fn args(&self) -> &[String] {
+    /// `None` for a command that neither formats nor runs the lanes.
+    pub(crate) const fn mode(&self) -> Option<Mode> {
         match self {
-            Self::Test(args) | Self::Bench(args) => args,
-            Self::Check | Self::Gate => &[],
+            Self::Check => Some(Mode::Local),
+            Self::Gate(mode) => Some(*mode),
+            Self::Test(_) | Self::Bench(_) => None,
+        }
+    }
+
+    pub(crate) fn args(&self) -> Vec<String> {
+        match self {
+            Self::Test(args) | Self::Bench(args) => args.clone(),
+            Self::Gate(Mode::Ci) => vec!["--ci".to_owned()],
+            Self::Check | Self::Gate(Mode::Local) => Vec::new(),
         }
     }
 
@@ -45,7 +83,11 @@ impl Task {
             "check" => Self::Check,
             "test" => Self::Test(args()),
             "bench" => Self::Bench(args()),
-            "gate" => Self::Gate,
+            "gate" => Self::Gate(if sub.get_flag("ci") {
+                Mode::Ci
+            } else {
+                Mode::Local
+            }),
             _ => unreachable!("clap knows only these subcommands"),
         }
     }
@@ -64,10 +106,10 @@ fn command() -> Command {
         .bin_name("cargo drive")
         .about("The one way to check, test, document and bench the workspace")
         .subcommand_required(true)
-        .subcommand(
-            Command::new("check")
-                .about("The check after a change: fmt, lint, ship, tests, doc tests by default"),
-        )
+        .subcommand(Command::new("check").about(
+            "The check after a change: fmt, lint, ship, tests, doc tests by default; \
+             the first failure ends it",
+        ))
         .subcommand(
             Command::new("test")
                 .about("The tests, each time; with arguments, only the ones nextest selects")
@@ -83,9 +125,17 @@ fn command() -> Command {
                 )),
         )
         .subcommand(
-            Command::new("gate").about(
-                "Every step CI runs: check's lanes and rustdoc by default, with fmt --check",
-            ),
+            Command::new("gate")
+                .about(
+                    "Every step CI runs: check's lanes and rustdoc by default; \
+                     the first failure ends it",
+                )
+                .arg(
+                    Arg::new("ci")
+                        .long("ci")
+                        .action(ArgAction::SetTrue)
+                        .help("For CI: list the unformatted files, and run past failures"),
+                ),
         )
 }
 
@@ -99,14 +149,22 @@ mod tests {
 
     #[test]
     fn passes_arguments_through() {
-        assert_eq!(parse(&["drive", "check"]), Task::Check);
-        assert_eq!((Task::Gate.name(), Task::Gate.args()), ("gate", &[][..]));
+        let check = parse(&["drive", "check"]);
+        assert_eq!((check.mode(), check), (Some(Mode::Local), Task::Check));
+        let gate = parse(&["drive", "gate"]);
+        assert_eq!(gate, Task::Gate(Mode::Local));
+        assert_eq!(gate.mode(), Some(Mode::Local));
+        assert_eq!((gate.name(), gate.args()), ("gate", Vec::new()));
+        let ci = parse(&["drive", "gate", "--ci"]);
+        assert_eq!(ci, Task::Gate(Mode::Ci));
+        assert_eq!(ci.mode(), Some(Mode::Ci));
+        assert_eq!(ci.args(), ["--ci"]);
         let bench = parse(&["drive", "bench", "--test"]);
         assert_eq!(
             (bench.name(), bench.args()),
-            ("bench", &["--test".to_owned()][..])
+            ("bench", vec!["--test".to_owned()])
         );
-        assert_eq!(parse(&["drive", "gate"]), Task::Gate);
+        assert_eq!(bench.mode(), None);
         assert_eq!(parse(&["drive", "test"]), Task::Test(Vec::new()));
         assert_eq!(
             parse(&["drive", "test", "-E", "package(lumos)", "--no-capture"]),
@@ -123,6 +181,7 @@ mod tests {
         let fails = |argv: &[&str]| command().try_get_matches_from(argv).is_err();
         assert!(fails(&["drive"]));
         assert!(fails(&["drive", "check", "-p", "x"]));
+        assert!(fails(&["drive", "check", "--ci"]));
         assert!(fails(&["drive", "lint"]));
     }
 }
