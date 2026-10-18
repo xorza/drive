@@ -18,6 +18,13 @@ pub(crate) enum Targets {
 }
 
 impl FlagSet {
+    pub(crate) fn all_features() -> Self {
+        Self {
+            features: vec!["--all-features".to_owned()],
+            ..Self::default()
+        }
+    }
+
     pub(crate) fn parse(
         text: &str,
         key: &'static str,

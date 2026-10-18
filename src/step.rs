@@ -1,8 +1,7 @@
-use std::collections::BTreeSet;
-
 use crate::flag_set::FlagSet;
-use crate::lanes::{Lane, TestRunner};
+use crate::lanes::TestRunner;
 use crate::root::Root;
+use crate::sweep::Sweep;
 
 /// Cargo's messages as JSON, each diagnostic short: the driver tells a lint from code that does
 /// not compile, and prints each diagnostic once. The format is in no fingerprint.
@@ -118,8 +117,7 @@ impl Step {
         Self::new(root, "fmt", Kind::Format, argv)
     }
 
-    pub(crate) fn lints(root: &Root) -> Vec<Self> {
-        let sets = &root.lanes.lint;
+    pub(crate) fn lints(root: &Root, sets: &[FlagSet]) -> Vec<Self> {
         let lane = |(i, set): (usize, &FlagSet)| {
             let mut argv = vec!["clippy", "--workspace", "--all-targets"];
             argv.extend(set.args());
@@ -255,17 +253,19 @@ impl Step {
         })
     }
 
-    /// The steps of `lanes`, in the order of [`Lane`].
-    pub(crate) fn every(root: &Root, lanes: &BTreeSet<Lane>, format: Format) -> Vec<Self> {
-        let mut steps = Vec::new();
-        for lane in lanes {
-            match lane {
-                Lane::Fmt => steps.push(Self::fmt(root, format)),
-                Lane::Lint => steps.extend(Self::lints(root)),
-                Lane::Ship => steps.push(Self::ship(root)),
-                Lane::Doc => steps.push(Self::doc(root)),
-                Lane::Tests => steps.extend(Self::tests(root, &[], Runs::OnChange)),
-                Lane::Doctests => steps.extend(Self::doctests(root, Runs::OnChange)),
+    /// The steps of `sweep`, the lints first, as they answer in seconds, and the docs last.
+    pub(crate) fn every(root: &Root, sweep: Sweep) -> Vec<Self> {
+        let mut steps = vec![Self::fmt(root, sweep.format())];
+        match sweep {
+            Sweep::Check => steps.extend(Self::lints(root, &[FlagSet::all_features()])),
+            Sweep::Gate | Sweep::GateCi => {
+                steps.extend(Self::lints(root, &root.lanes.lint));
+                steps.push(Self::ship(root));
+                steps.extend(Self::tests(root, &[], Runs::OnChange));
+                if root.lanes.docs {
+                    steps.push(Self::doc(root));
+                    steps.extend(Self::doctests(root, Runs::OnChange));
+                }
             }
         }
         steps
@@ -299,6 +299,7 @@ impl Step {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::flag_set::Targets;
 
     #[test]
     fn lane_commands() {
@@ -308,7 +309,7 @@ mod tests {
             join(&Step::fmt(&root, Format::Check)),
             "fmt -p core -p app -p harness -p check --check"
         );
-        let lints = Step::lints(&root);
+        let lints = Step::lints(&root, &root.lanes.lint);
         assert_eq!(lints.len(), 1);
         assert_eq!(lints[0].name, "lint");
         assert_eq!(
@@ -354,23 +355,35 @@ mod tests {
     }
 
     #[test]
-    fn every_follows_the_lane_order() {
-        let root = Root::fixture();
-        let names = |lanes: &[Lane]| -> Vec<String> {
-            let lanes: BTreeSet<Lane> = lanes.iter().copied().collect();
-            Step::every(&root, &lanes, Format::Write)
+    fn every_runs_the_fixed_lanes_of_the_sweep() {
+        let mut root = Root::fixture();
+        let none = FlagSet::parse("--no-default-features", "lint", Targets::Refused).unwrap();
+        root.lanes.lint = vec![none.clone(), FlagSet::all_features()];
+        root.lanes.test.push(none);
+        let names = |root: &Root, sweep| -> Vec<String> {
+            Step::every(root, sweep)
                 .into_iter()
                 .map(|s| s.name)
                 .collect()
         };
+        assert_eq!(names(&root, Sweep::Check), ["fmt", "lint"]);
+        let gate = ["fmt", "lint.1", "lint.2", "ship", "tests.1", "tests.2"];
+        assert_eq!(names(&root, Sweep::Gate), gate);
+        assert_eq!(names(&root, Sweep::GateCi), gate);
+        root.lanes.docs = true;
+        assert_eq!(names(&root, Sweep::Gate)[6..], ["doc", "doctests"]);
+        assert_eq!(names(&root, Sweep::Check), ["fmt", "lint"]);
+
+        // `check` lints every feature whatever sets the root lists, in the command of `gate`'s
+        // lint with the same flags, and so shares its pass.
+        let check = Step::every(&root, Sweep::Check);
+        let gate = Step::every(&root, Sweep::Gate);
         assert_eq!(
-            names(&root.lanes.check.iter().copied().collect::<Vec<_>>()),
-            ["fmt", "lint", "ship", "tests", "doctests"]
+            (check[1].argv.as_slice(), check[1].label.as_str()),
+            (gate[2].argv.as_slice(), "--all-features")
         );
-        assert_eq!(
-            names(&[Lane::Doctests, Lane::Doc, Lane::Fmt]),
-            ["fmt", "doc", "doctests"]
-        );
+        assert_ne!(gate[1].argv, gate[2].argv);
+        assert_eq!(check[0], gate[0]);
     }
 
     #[test]

@@ -64,6 +64,8 @@ pub(crate) enum ConfigError {
         feature: String,
         by: String,
     },
+    /// A `doc` set in a table without `docs = true`, which no lane would read.
+    DocWithoutDocs,
 }
 
 impl fmt::Display for Error {
@@ -112,6 +114,7 @@ impl fmt::Display for ConfigError {
             Self::FeatureComesBack { key, feature, by } => {
                 write!(f, "drive.{key}: `{by}` turns `{feature}` on again")
             }
+            Self::DocWithoutDocs => f.write_str("drive.doc: rustdoc runs only with `docs = true`"),
         }
     }
 }

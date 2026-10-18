@@ -377,7 +377,8 @@ impl<'p> Runner<'p> {
         Some(paths)
     }
 
-    /// A step's identity: what changes its result from outside the working files.
+    /// A step's identity: what changes its result from outside the working files. Its command,
+    /// not its name: `check`'s lint and `gate`'s lint of the same flags share a pass.
     fn key(&mut self, root: &Root, step: &Step) -> String {
         let rustc = self
             .rustc
@@ -395,7 +396,7 @@ impl<'p> Runner<'p> {
             .map(|(name, value)| (name, Some(value)))
             .collect();
         env.extend(step.env.iter().cloned());
-        let identity = serde_json::json!([root.dir, step.name, step.argv, env, tools]);
+        let identity = serde_json::json!([root.dir, step.argv, env, tools]);
         identity.to_string()
     }
 }

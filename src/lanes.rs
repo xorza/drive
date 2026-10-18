@@ -15,11 +15,10 @@ pub(crate) struct Lanes {
     pub(crate) test: Vec<FlagSet>,
     pub(crate) doc: FlagSet,
     pub(crate) bench: FlagSet,
-    /// The lanes `check` runs: every one but `doc` by default, as rustdoc builds the docs of each
-    /// crate a change reaches again, with no incremental cache.
-    pub(crate) check: BTreeSet<Lane>,
-    /// The lanes `gate` runs: every one by default.
-    pub(crate) gate: BTreeSet<Lane>,
+    /// Rustdoc and the doc tests, which only a table that asks for them runs: rustdoc builds the
+    /// docs of each crate a change reaches again, with no incremental cache, and each doc test is
+    /// a binary.
+    pub(crate) docs: bool,
     pub(crate) test_runner: TestRunner,
 }
 
@@ -36,30 +35,6 @@ pub(crate) enum TestRunner {
     CargoTest,
 }
 
-/// A kind of lane a command can run, in the order every command runs them: the lints first, as
-/// they answer in seconds.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub(crate) enum Lane {
-    Fmt,
-    Lint,
-    Ship,
-    Doc,
-    Tests,
-    Doctests,
-}
-
-impl Lane {
-    const ALL: [Self; 6] = [
-        Self::Fmt,
-        Self::Lint,
-        Self::Ship,
-        Self::Doc,
-        Self::Tests,
-        Self::Doctests,
-    ];
-}
-
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Table {
@@ -67,8 +42,7 @@ struct Table {
     test: Option<Vec<Set>>,
     doc: Option<Set>,
     bench: Option<String>,
-    check: Option<Vec<Lane>>,
-    gate: Option<Vec<Lane>>,
+    docs: Option<bool>,
     #[serde(rename = "test-runner")]
     test_runner: Option<TestRunner>,
 }
@@ -118,36 +92,24 @@ impl Lanes {
                 .map(|s| s.resolve(key, targets, features))
                 .collect()
         };
+        let docs = table.docs.unwrap_or_default();
+        let doc = match table.doc {
+            Some(_) if !docs => return Err(ConfigError::DocWithoutDocs),
+            Some(set) => set.resolve("doc", Targets::Refused, features)?,
+            None => FlagSet::all_features(),
+        };
         Ok(Self {
             lint: sets("lint", table.lint, Targets::Refused)?,
             test: sets("test", table.test, Targets::Allowed)?,
-            doc: table
-                .doc
-                .unwrap_or_else(|| Set::Flags("--all-features".to_owned()))
-                .resolve("doc", Targets::Refused, features)?,
+            doc,
             bench: FlagSet::parse(
                 table.bench.as_deref().unwrap_or(""),
                 "bench",
                 Targets::Refused,
             )?,
-            check: selected("check", table.check, || {
-                Lane::ALL.into_iter().filter(|l| *l != Lane::Doc).collect()
-            })?,
-            gate: selected("gate", table.gate, || Lane::ALL.into())?,
+            docs,
             test_runner: table.test_runner.unwrap_or_default(),
         })
-    }
-}
-
-fn selected(
-    key: &'static str,
-    lanes: Option<Vec<Lane>>,
-    default: impl FnOnce() -> BTreeSet<Lane>,
-) -> Result<BTreeSet<Lane>, ConfigError> {
-    match lanes {
-        Some(lanes) if lanes.is_empty() => Err(ConfigError::EmptyList { key }),
-        Some(lanes) => Ok(lanes.into_iter().collect()),
-        None => Ok(default()),
     }
 }
 
@@ -270,21 +232,8 @@ mod tests {
         assert_eq!(defaults.test, [set("--all-features", Targets::Refused)]);
         assert_eq!(defaults.doc, set("--all-features", Targets::Refused));
         assert_eq!(defaults.bench, FlagSet::default());
-        let set_of = |names: &[Lane]| names.iter().copied().collect::<BTreeSet<_>>();
-        assert_eq!(
-            defaults.check,
-            set_of(&[
-                Lane::Fmt,
-                Lane::Lint,
-                Lane::Ship,
-                Lane::Tests,
-                Lane::Doctests
-            ])
-        );
-        assert_eq!(defaults.gate, set_of(&Lane::ALL));
-        let chosen = lanes_of(json!({ "gate": ["tests", "fmt", "lint"], "check": ["lint"] }));
-        assert_eq!(chosen.gate, set_of(&[Lane::Fmt, Lane::Lint, Lane::Tests]));
-        assert_eq!(chosen.check, set_of(&[Lane::Lint]));
+        assert!(!defaults.docs);
+        assert!(lanes_of(json!({ "docs": true })).docs);
         assert_eq!(defaults.test_runner, TestRunner::Nextest);
         assert_eq!(
             lanes_of(json!({ "test-runner": "cargo-test" })).test_runner,
@@ -334,8 +283,18 @@ mod tests {
             "drive.lint: must be a non-empty list"
         );
         assert_eq!(
-            fails(json!({ "doc": "--lib" })),
+            fails(json!({ "doc": "--lib", "docs": true })),
             "drive.doc: `--lib` is not a feature or target flag"
+        );
+        for docs in [json!({ "doc": "" }), json!({ "doc": "", "docs": false })] {
+            assert_eq!(
+                fails(docs),
+                "drive.doc: rustdoc runs only with `docs = true`"
+            );
+        }
+        assert_eq!(
+            lanes_of(json!({ "doc": "--features gpu", "docs": true })).doc,
+            set("--features gpu", Targets::Refused)
         );
         assert_eq!(
             fails(json!({ "test": [{ "all-features-but": ["core/gpu"] }] })),
@@ -348,13 +307,11 @@ mod tests {
         );
         assert!(fails(json!({ "tests": [] })).starts_with("drive table: unknown field `tests`"));
         assert_eq!(
-            fails(json!({ "gate": [] })),
-            "drive.gate: must be a non-empty list"
+            fails(json!({ "lint": [] })),
+            "drive.lint: must be a non-empty list"
         );
-        assert!(
-            fails(json!({ "gate": ["clippy"] }))
-                .starts_with("drive table: unknown variant `clippy`")
-        );
+        // The lanes of each command are fixed.
+        assert!(fails(json!({ "gate": ["fmt"] })).starts_with("drive table: unknown field `gate`"));
         assert!(matches!(
             lanes(Some(json!({})), Some(json!({}))),
             Err(ConfigError::TwoTables)

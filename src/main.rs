@@ -39,21 +39,20 @@ mod project;
 mod root;
 mod runner;
 mod step;
+mod sweep;
 mod tool;
 
-use std::collections::BTreeSet;
 use std::path::Path;
 use std::process::ExitCode;
 
-use crate::cli::{Mode, Task};
+use crate::cli::Task;
 use crate::error::{Error, Result};
 use crate::journal::{End, Journal};
-use crate::lanes::Lane;
 use crate::output::Ci;
 use crate::project::Project;
-use crate::root::Root;
 use crate::runner::{Finished, OnFail, Plan, Reuse, Runner};
-use crate::step::{Runs, Step};
+use crate::step::{Format, Runs, Step};
+use crate::sweep::Sweep;
 
 fn main() -> ExitCode {
     let task = Task::parse();
@@ -104,24 +103,25 @@ fn run(task: &Task, top: &Path, ci: Ci, journal: &mut Journal) -> Result<Finishe
             );
         }
     }
-    if ci == Ci::GitHub && task.mode() == Some(Mode::Local) {
+    if let Task::Sweep(sweep) = task
+        && sweep.format() == Format::Write
+        && ci == Ci::GitHub
+    {
         return Err(Error::LocalInCi {
-            command: task.name(),
+            command: sweep.name(),
         });
     }
     let project = Project::load(top)?;
     journal.loaded();
     let root = project.top();
     match task {
-        Task::Check => every_root(&project, ci, Mode::Local, |r| &r.lanes.check),
-        Task::Gate(mode) => every_root(&project, ci, *mode, |r| &r.lanes.gate),
+        Task::Sweep(sweep) => every_root(&project, ci, *sweep),
         Task::Test(args) => {
             let mut steps = Step::tests(root, args, Runs::Always);
-            // nextest's arguments select no doc test; a whole run keeps its pass for the checks,
-            // with the doc tests when a command of the root runs them.
-            let lanes = &root.lanes;
+            // nextest's arguments select no doc test; a whole run keeps its pass for `gate`, with
+            // the doc tests where it runs them.
             let reuse = if args.is_empty() {
-                if lanes.check.contains(&Lane::Doctests) || lanes.gate.contains(&Lane::Doctests) {
+                if root.lanes.docs {
                     steps.extend(Step::doctests(root, Runs::Always));
                 }
                 Reuse::Passes
@@ -145,20 +145,14 @@ fn run(task: &Task, top: &Path, ci: Ci, journal: &mut Journal) -> Result<Finishe
     }
 }
 
-/// The lanes `pick` chooses, on every root of the project.
-fn every_root(
-    project: &Project,
-    ci: Ci,
-    mode: Mode,
-    pick: impl Fn(&Root) -> &BTreeSet<Lane>,
-) -> Result<Finished> {
+fn every_root(project: &Project, ci: Ci, sweep: Sweep) -> Result<Finished> {
     let plans: Vec<Plan<'_>> = project
         .roots()
         .iter()
         .map(|r| Plan {
             root: r,
-            steps: Step::every(r, pick(r), mode.format()),
+            steps: Step::every(r, sweep),
         })
         .collect();
-    Ok(Runner::new(project, ci, Reuse::Passes)?.run(&plans, mode.on_fail()))
+    Ok(Runner::new(project, ci, Reuse::Passes)?.run(&plans, sweep.on_fail()))
 }

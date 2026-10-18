@@ -1,44 +1,16 @@
 use clap::{Arg, ArgAction, ArgMatches, Command};
 
-use crate::runner::OnFail;
-use crate::step::Format;
+use crate::sweep::Sweep;
 
 /// One command of `cargo drive`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Task {
-    /// The check after a change: the root's `check` lanes, each as its passes allow.
-    Check,
+    /// `check` or `gate`: fixed lanes on every root, each as its passes allow.
+    Sweep(Sweep),
     /// The tests, every one or those nextest's arguments select, each time.
     Test(Vec<String>),
     /// The benches, with the bench binaries' arguments.
     Bench(Vec<String>),
-    /// The root's `gate` lanes.
-    Gate(Mode),
-}
-
-/// Who runs `check` or `gate`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Mode {
-    /// An agent or a person, who wants the files formatted and the first failure soon.
-    Local,
-    /// CI, which can change no file and reports every failure of one run.
-    Ci,
-}
-
-impl Mode {
-    pub(crate) const fn format(self) -> Format {
-        match self {
-            Self::Local => Format::Write,
-            Self::Ci => Format::Check,
-        }
-    }
-
-    pub(crate) const fn on_fail(self) -> OnFail {
-        match self {
-            Self::Local => OnFail::Stop,
-            Self::Ci => OnFail::Continue,
-        }
-    }
 }
 
 impl Task {
@@ -48,27 +20,17 @@ impl Task {
 
     pub(crate) const fn name(&self) -> &'static str {
         match self {
-            Self::Check => "check",
+            Self::Sweep(sweep) => sweep.name(),
             Self::Test(_) => "test",
             Self::Bench(_) => "bench",
-            Self::Gate(_) => "gate",
-        }
-    }
-
-    /// `None` for a command that neither formats nor runs the lanes.
-    pub(crate) const fn mode(&self) -> Option<Mode> {
-        match self {
-            Self::Check => Some(Mode::Local),
-            Self::Gate(mode) => Some(*mode),
-            Self::Test(_) | Self::Bench(_) => None,
         }
     }
 
     pub(crate) fn args(&self) -> Vec<String> {
         match self {
             Self::Test(args) | Self::Bench(args) => args.clone(),
-            Self::Gate(Mode::Ci) => vec!["--ci".to_owned()],
-            Self::Check | Self::Gate(Mode::Local) => Vec::new(),
+            Self::Sweep(Sweep::GateCi) => vec!["--ci".to_owned()],
+            Self::Sweep(Sweep::Check | Sweep::Gate) => Vec::new(),
         }
     }
 
@@ -80,13 +42,13 @@ impl Task {
                 .unwrap_or_default()
         };
         match name {
-            "check" => Self::Check,
+            "check" => Self::Sweep(Sweep::Check),
             "test" => Self::Test(args()),
             "bench" => Self::Bench(args()),
-            "gate" => Self::Gate(if sub.get_flag("ci") {
-                Mode::Ci
+            "gate" => Self::Sweep(if sub.get_flag("ci") {
+                Sweep::GateCi
             } else {
-                Mode::Local
+                Sweep::Gate
             }),
             _ => unreachable!("clap knows only these subcommands"),
         }
@@ -107,7 +69,7 @@ fn command() -> Command {
         .about("The one way to check, test, document and bench the workspace")
         .subcommand_required(true)
         .subcommand(Command::new("check").about(
-            "The check after a change: fmt, lint, ship, tests, doc tests by default; \
+            "The check after a change: fmt, then clippy on every target with every feature; \
              the first failure ends it",
         ))
         .subcommand(
@@ -127,8 +89,8 @@ fn command() -> Command {
         .subcommand(
             Command::new("gate")
                 .about(
-                    "Every step CI runs: check's lanes and rustdoc by default; \
-                     the first failure ends it",
+                    "Every step CI runs: fmt, each lint set, ship, the tests, and rustdoc and the \
+                     doc tests where `docs = true`; the first failure ends it",
                 )
                 .arg(
                     Arg::new("ci")
@@ -150,21 +112,19 @@ mod tests {
     #[test]
     fn passes_arguments_through() {
         let check = parse(&["drive", "check"]);
-        assert_eq!((check.mode(), check), (Some(Mode::Local), Task::Check));
+        assert_eq!(check, Task::Sweep(Sweep::Check));
+        assert_eq!((check.name(), check.args()), ("check", Vec::new()));
         let gate = parse(&["drive", "gate"]);
-        assert_eq!(gate, Task::Gate(Mode::Local));
-        assert_eq!(gate.mode(), Some(Mode::Local));
+        assert_eq!(gate, Task::Sweep(Sweep::Gate));
         assert_eq!((gate.name(), gate.args()), ("gate", Vec::new()));
         let ci = parse(&["drive", "gate", "--ci"]);
-        assert_eq!(ci, Task::Gate(Mode::Ci));
-        assert_eq!(ci.mode(), Some(Mode::Ci));
-        assert_eq!(ci.args(), ["--ci"]);
+        assert_eq!(ci, Task::Sweep(Sweep::GateCi));
+        assert_eq!((ci.name(), ci.args()), ("gate", vec!["--ci".to_owned()]));
         let bench = parse(&["drive", "bench", "--test"]);
         assert_eq!(
             (bench.name(), bench.args()),
             ("bench", vec!["--test".to_owned()])
         );
-        assert_eq!(bench.mode(), None);
         assert_eq!(parse(&["drive", "test"]), Task::Test(Vec::new()));
         assert_eq!(
             parse(&["drive", "test", "-E", "package(lumos)", "--no-capture"]),
