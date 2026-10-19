@@ -1,7 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::{Duration, Instant};
 
 use crate::error::{Error, Result};
@@ -242,7 +241,7 @@ impl<'p> Runner<'p> {
         let file = File::create(&aside).map_err(io(aside.clone()))?;
         let mut command = match &step.program {
             Program::Cargo => tool::cargo(),
-            Program::Other(path) => Command::new(path),
+            Program::Other(path) => tool::command(path),
             Program::Copy { from, to } => {
                 let started = Instant::now();
                 let copied = copy(from, to);
@@ -366,7 +365,7 @@ impl<'p> Runner<'p> {
         let rustc = self
             .rustc
             .get_or_insert_with(|| {
-                tool::first_line(Command::new("rustc").arg("-V").current_dir(&root.dir))
+                tool::first_line(tool::command("rustc").arg("-V").current_dir(&root.dir))
             })
             .clone();
         let mut tools = vec![rustc];
@@ -380,9 +379,16 @@ impl<'p> Runner<'p> {
             });
             tools.push(nextest.clone());
         }
-        let mut env: BTreeMap<String, Option<String>> = std::env::vars()
-            .filter(|(name, _)| name.starts_with("RUST") || name.starts_with("CARGO"))
-            .map(|(name, value)| (name, Some(value)))
+        // `vars` panics on any variable that is not UTF-8, also one no key reads. Each value keeps
+        // its bytes escaped, so no two values, UTF-8 or not, read alike.
+        let mut env: BTreeMap<String, Option<String>> = std::env::vars_os()
+            .filter(|(name, _)| !tool::is_drivers_own(name))
+            .filter_map(|(name, value)| {
+                let name = name.into_string().ok()?;
+                let value = value.as_encoded_bytes().escape_ascii().to_string();
+                (name.starts_with("RUST") || name.starts_with("CARGO"))
+                    .then_some((name, Some(value)))
+            })
             .collect();
         // The steps of one command share its identity, which holds each step's own variables.
         if let Some(shared) = &step.shared {

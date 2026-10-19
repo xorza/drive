@@ -1,7 +1,6 @@
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::{Duration, Instant, SystemTime};
 
 use crate::outcome::Outcome;
@@ -85,8 +84,8 @@ impl Journal {
             "error": error,
             "seconds": seconds(elapsed),
             "load_seconds": seconds(self.load),
-            "driver": tool::first_line(Command::new("git").args(["describe", "--always", "--dirty"]).current_dir(env!("CARGO_MANIFEST_DIR"))),
-            "rustc": tool::first_line(Command::new("rustc").arg("-V").current_dir(project)),
+            "driver": tool::first_line(tool::command("git").args(["describe", "--always", "--dirty"]).current_dir(env!("CARGO_MANIFEST_DIR"))),
+            "rustc": tool::first_line(tool::command("rustc").arg("-V").current_dir(project)),
             "os": std::env::consts::OS,
             "arch": std::env::consts::ARCH,
             "cpus": std::thread::available_parallelism().map_or(0, usize::from),

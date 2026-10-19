@@ -1,9 +1,9 @@
 //! The git trees a step's passes are keyed on.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use crate::error::{Error, Result};
+use crate::tool;
 
 /// A repository: its top folder and its index.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -72,7 +72,7 @@ impl Repo {
 
 /// A git command's stdout; `None` when it fails.
 fn git(dir: &Path, args: &[&str], env: &[(&str, &std::ffi::OsStr)]) -> Option<String> {
-    let out = Command::new("git")
+    let out = tool::command("git")
         .args(args)
         .envs(env.iter().copied())
         .current_dir(dir)
