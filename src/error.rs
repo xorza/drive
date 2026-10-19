@@ -35,6 +35,19 @@ pub(crate) enum Error {
     LocalInCi {
         command: &'static str,
     },
+    /// `run` of a name the root's `commands` table does not hold.
+    UnknownCommand {
+        name: String,
+        known: Vec<String>,
+    },
+    /// Arguments to a project command none of whose steps takes them.
+    ArgsRefused {
+        command: String,
+    },
+    /// `package` in a root whose table names no binary to ship.
+    NothingToPackage {
+        dir: PathBuf,
+    },
 }
 
 /// What is wrong with a root's `drive` table.
@@ -66,6 +79,35 @@ pub(crate) enum ConfigError {
     },
     /// A `doc` set in a table without `docs = true`, which no lane would read.
     DocWithoutDocs,
+    UnknownMember {
+        key: &'static str,
+        member: String,
+    },
+    /// A path that names no file or folder, which no change would reach.
+    MissingPath {
+        key: &'static str,
+        path: String,
+    },
+    /// A `cross-lint` key that names no OS the driver knows.
+    UnknownHost {
+        host: String,
+    },
+    /// A `package` entry that names no binary of a member.
+    UnknownBinary {
+        name: String,
+    },
+    /// A step of a project command that names no kind, or two.
+    StepKind {
+        command: String,
+        step: usize,
+    },
+    ArgsTwice {
+        command: String,
+    },
+    /// A `tests` step in a root whose tests `cargo test` runs, which takes no filter.
+    TestsNeedNextest {
+        command: String,
+    },
 }
 
 impl fmt::Display for Error {
@@ -89,6 +131,27 @@ impl fmt::Display for Error {
                 f,
                 "`cargo drive {command}` formats the checkout and stops at the first failure; \
                  CI runs `cargo drive gate --ci`"
+            ),
+            Self::UnknownCommand { name, known } if known.is_empty() => {
+                write!(
+                    f,
+                    "no command `{name}`: the root's drive table holds no command"
+                )
+            }
+            Self::UnknownCommand { name, known } => {
+                write!(
+                    f,
+                    "no command `{name}`; the root's commands: {}",
+                    known.join(", ")
+                )
+            }
+            Self::ArgsRefused { command } => {
+                write!(f, "no step of `{command}` takes arguments")
+            }
+            Self::NothingToPackage { dir } => write!(
+                f,
+                "the drive table of {} names no binary to package",
+                dir.display()
             ),
         }
     }
@@ -115,6 +178,35 @@ impl fmt::Display for ConfigError {
                 write!(f, "drive.{key}: `{by}` turns `{feature}` on again")
             }
             Self::DocWithoutDocs => f.write_str("drive.doc: rustdoc runs only with `docs = true`"),
+            Self::UnknownMember { key, member } => {
+                write!(f, "drive.{key}: `{member}` names no member")
+            }
+            Self::MissingPath { key, path } => {
+                write!(f, "drive.{key}: `{path}` names no file or folder")
+            }
+            Self::UnknownHost { host } => write!(
+                f,
+                "drive.cross-lint: `{host}` is not `linux`, `macos` or `windows`"
+            ),
+            Self::UnknownBinary { name } => {
+                write!(f, "drive.package: `{name}` names no binary of a member")
+            }
+            Self::StepKind { command, step } => write!(
+                f,
+                "drive.commands.{command}: step {step} names not one of `build`, `cargo`, \
+                 `program` and `tests`"
+            ),
+            Self::ArgsTwice { command } => {
+                write!(
+                    f,
+                    "drive.commands.{command}: two steps take the command's arguments"
+                )
+            }
+            Self::TestsNeedNextest { command } => write!(
+                f,
+                "drive.commands.{command}: a `tests` step takes a nextest filter, and the root \
+                 runs `cargo test`"
+            ),
         }
     }
 }

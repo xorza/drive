@@ -1,11 +1,18 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
 
 use serde::Deserialize;
 
 use crate::error::ConfigError;
 use crate::flag_set::{FlagSet, Targets};
+use crate::member::Member;
+use crate::project_command::{CommandTable, ProjectCommand};
+use crate::reads::{Reader, ReaderTable};
 
-/// A root's lanes, from its `drive` table: `[workspace.metadata.drive]`, or
+/// The OSes a `cross-lint` table may name, as Rust's `std::env::consts::OS` names them.
+const CROSS_HOSTS: [&str; 3] = ["linux", "macos", "windows"];
+
+/// A root's lanes and its own commands, from its `drive` table: `[workspace.metadata.drive]`, or
 /// `[package.metadata.drive]` in a root that is one package.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct Lanes {
@@ -20,6 +27,16 @@ pub(crate) struct Lanes {
     /// a binary.
     pub(crate) docs: bool,
     pub(crate) test_runner: TestRunner,
+    /// Whether the gate runs each bench case once, so a bench that no longer runs fails it.
+    pub(crate) gate_benches: bool,
+    /// The targets a local gate lints for besides the host's, on this host: the OS of each is
+    /// checked on that OS in CI, and a local run catches its code that does not compile.
+    pub(crate) cross_lint: Vec<String>,
+    /// The binaries `package` ships, each by its name.
+    pub(crate) package: Vec<String>,
+    pub(crate) reads: Vec<Reader>,
+    /// The root's own commands, by name.
+    pub(crate) commands: Vec<ProjectCommand>,
 }
 
 /// What runs the test lanes.
@@ -45,6 +62,17 @@ struct Table {
     docs: Option<bool>,
     #[serde(rename = "test-runner")]
     test_runner: Option<TestRunner>,
+    #[serde(rename = "gate-benches", default)]
+    gate_benches: bool,
+    /// Each host's targets, by the OS's name.
+    #[serde(rename = "cross-lint", default)]
+    cross_lint: BTreeMap<String, Vec<String>>,
+    #[serde(default)]
+    package: Vec<String>,
+    #[serde(default)]
+    reads: Vec<ReaderTable>,
+    #[serde(default)]
+    commands: BTreeMap<String, CommandTable>,
 }
 
 /// Cargo's feature and target flags, or every feature of every member but the ones named.
@@ -66,11 +94,14 @@ struct AllBut {
 pub(crate) type Features<'m> = BTreeMap<&'m str, &'m BTreeMap<String, Vec<String>>>;
 
 impl Lanes {
-    /// `workspace` is `[workspace.metadata.drive]`, `package` the root package's.
+    /// `workspace` is `[workspace.metadata.drive]`, `package` the root package's; `dir` is the
+    /// root's folder, which the paths `reads` names are taken from.
     pub(crate) fn from_tables(
         workspace: Option<serde_json::Value>,
         package: Option<serde_json::Value>,
         features: &Features<'_>,
+        dir: &Path,
+        members: &[Member],
     ) -> Result<Self, ConfigError> {
         let table = match (workspace, package) {
             (Some(_), Some(_)) => return Err(ConfigError::TwoTables),
@@ -98,6 +129,26 @@ impl Lanes {
             Some(set) => set.resolve("doc", Targets::Refused, features)?,
             None => FlagSet::all_features(),
         };
+        if let Some(host) = table
+            .cross_lint
+            .keys()
+            .find(|host| !CROSS_HOSTS.contains(&host.as_str()))
+        {
+            return Err(ConfigError::UnknownHost { host: host.clone() });
+        }
+        let binary = |name: &String| members.iter().any(|m| m.binaries.contains(name));
+        if let Some(name) = table.package.iter().find(|name| !binary(name)) {
+            return Err(ConfigError::UnknownBinary { name: name.clone() });
+        }
+        let is_member = |name: &str| members.iter().any(|m| m.name == name);
+        let reads = (table.reads.into_iter())
+            .map(|reader| Reader::resolve(reader, dir, is_member))
+            .collect::<Result<_, _>>()?;
+        let test_runner = table.test_runner.unwrap_or_default();
+        let commands = (table.commands.into_iter())
+            .map(|(name, command)| ProjectCommand::resolve(name, command, test_runner))
+            .collect::<Result<_, _>>()?;
+        let mut cross_lint = table.cross_lint;
         Ok(Self {
             lint: sets("lint", table.lint, Targets::Refused)?,
             test: sets("test", table.test, Targets::Allowed)?,
@@ -108,8 +159,18 @@ impl Lanes {
                 Targets::Refused,
             )?,
             docs,
-            test_runner: table.test_runner.unwrap_or_default(),
+            test_runner,
+            gate_benches: table.gate_benches,
+            cross_lint: cross_lint.remove(std::env::consts::OS).unwrap_or_default(),
+            package: table.package,
+            reads,
+            commands,
         })
+    }
+
+    /// The root's command `name`.
+    pub(crate) fn command(&self, name: &str) -> Option<&ProjectCommand> {
+        self.commands.iter().find(|command| command.name == name)
     }
 }
 
@@ -214,7 +275,17 @@ mod tests {
     ) -> Result<Lanes, ConfigError> {
         let owned = features();
         let features: Features<'_> = owned.iter().map(|(k, v)| (k.as_str(), v)).collect();
-        Lanes::from_tables(workspace, package, &features)
+        let member = |name: &str, binaries: &[&str]| Member {
+            name: name.to_owned(),
+            dir: Path::new("/w").join(name),
+            doctest: false,
+            benches: false,
+            binaries: binaries.iter().map(|&b| b.to_owned()).collect(),
+            outside: Vec::new(),
+        };
+        let members = [member("app", &["app", "tool"]), member("core", &[])];
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        Lanes::from_tables(workspace, package, &features, dir, &members)
     }
 
     fn lanes_of(workspace: serde_json::Value) -> Lanes {
@@ -235,6 +306,9 @@ mod tests {
         assert!(!defaults.docs);
         assert!(lanes_of(json!({ "docs": true })).docs);
         assert_eq!(defaults.test_runner, TestRunner::Nextest);
+        assert!(!defaults.gate_benches && defaults.cross_lint.is_empty());
+        assert!(defaults.package.is_empty() && defaults.reads.is_empty());
+        assert!(defaults.commands.is_empty());
         assert_eq!(
             lanes_of(json!({ "test-runner": "cargo-test" })).test_runner,
             TestRunner::CargoTest
@@ -272,6 +346,56 @@ mod tests {
             "all features but core/real-data, app/tracy"
         );
         assert_eq!(test[0].features_only(), test[0]);
+    }
+
+    #[test]
+    fn the_root_s_own_keys() {
+        let own = lanes_of(json!({
+            "gate-benches": true,
+            "cross-lint": { (std::env::consts::OS): ["x86_64-pc-windows-gnu"] },
+            "package": ["tool", "app"],
+            "reads": [{ "member": "core", "paths": ["src"] }],
+            "commands": {
+                "lan": { "joins": "gate", "steps": [{ "build": "build -p app" }] },
+                "index": { "steps": [{ "tests": "test(=index)" }] },
+            },
+        }));
+        assert!(own.gate_benches);
+        // The targets of this host's OS, the one OS a run reads.
+        assert_eq!(own.cross_lint, ["x86_64-pc-windows-gnu"]);
+        assert_eq!(own.package, ["tool", "app"]);
+        let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/main.rs");
+        assert!(own.reads[0].reads(&src));
+        // The commands, by name.
+        let names: Vec<&str> = own.commands.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["index", "lan"]);
+        assert_eq!(own.command("lan").map(|c| c.steps.len()), Some(1));
+        assert!(own.command("zero-hour").is_none());
+        let other = if std::env::consts::OS == "linux" {
+            "macos"
+        } else {
+            "linux"
+        };
+        assert!(
+            lanes_of(json!({ "cross-lint": { (other): ["t"] } }))
+                .cross_lint
+                .is_empty()
+        );
+
+        let fails =
+            |workspace: serde_json::Value| lanes(Some(workspace), None).unwrap_err().to_string();
+        assert_eq!(
+            fails(json!({ "cross-lint": { "plan9": ["t"] } })),
+            "drive.cross-lint: `plan9` is not `linux`, `macos` or `windows`"
+        );
+        assert_eq!(
+            fails(json!({ "package": ["core"] })),
+            "drive.package: `core` names no binary of a member"
+        );
+        assert_eq!(
+            fails(json!({ "reads": [{ "member": "gui", "paths": ["."] }] })),
+            "drive.reads: `gui` names no member"
+        );
     }
 
     #[test]

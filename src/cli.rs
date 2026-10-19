@@ -11,6 +11,10 @@ pub(crate) enum Task {
     Test(Vec<String>),
     /// The benches, with the bench binaries' arguments.
     Bench(Vec<String>),
+    /// A command of the root's own, by its name, with its arguments.
+    Run { name: String, args: Vec<String> },
+    /// The release build of the binaries the root ships, stripped, with their debug info beside.
+    Package,
 }
 
 impl Task {
@@ -23,14 +27,17 @@ impl Task {
             Self::Sweep(sweep) => sweep.name(),
             Self::Test(_) => "test",
             Self::Bench(_) => "bench",
+            Self::Run { .. } => "run",
+            Self::Package => "package",
         }
     }
 
     pub(crate) fn args(&self) -> Vec<String> {
         match self {
             Self::Test(args) | Self::Bench(args) => args.clone(),
+            Self::Run { name, args } => std::iter::once(name).chain(args).cloned().collect(),
             Self::Sweep(Sweep::GateCi) => vec!["--ci".to_owned()],
-            Self::Sweep(Sweep::Check | Sweep::Gate) => Vec::new(),
+            Self::Sweep(Sweep::Check | Sweep::Gate) | Self::Package => Vec::new(),
         }
     }
 
@@ -38,8 +45,7 @@ impl Task {
         let (name, sub) = matches.subcommand().expect("a subcommand is required");
         let args = || {
             sub.get_many::<String>("args")
-                .map(|v| v.cloned().collect())
-                .unwrap_or_default()
+                .map_or_default(|v| v.cloned().collect())
         };
         match name {
             "check" => Self::Sweep(Sweep::Check),
@@ -50,6 +56,14 @@ impl Task {
             } else {
                 Sweep::Gate
             }),
+            "run" => Self::Run {
+                name: sub
+                    .get_one::<String>("name")
+                    .expect("clap requires a name")
+                    .clone(),
+                args: args(),
+            },
+            "package" => Self::Package,
             _ => unreachable!("clap knows only these subcommands"),
         }
     }
@@ -99,6 +113,19 @@ fn command() -> Command {
                         .help("For CI: list the unformatted files, and run past failures"),
                 ),
         )
+        .subcommand(
+            Command::new("run")
+                .about(
+                    "A command of the root's own, from `commands` in its drive table, each \
+                     time; with arguments for the step that takes them",
+                )
+                .arg(Arg::new("name").required(true).value_name("NAME"))
+                .arg(passed("the arguments of the step that takes them")),
+        )
+        .subcommand(Command::new("package").about(
+            "The release build of the binaries `package` names, each stripped in \
+             target/package with its debug info beside it",
+        ))
 }
 
 #[cfg(test)]
@@ -138,7 +165,20 @@ mod tests {
             parse(&["drive", "bench", "--test", "^atomic/"]),
             Task::Bench(["--test", "^atomic/"].map(str::to_owned).to_vec())
         );
+        let lan = parse(&["drive", "run", "lan", "--bless", "out"]);
+        assert_eq!(
+            lan,
+            Task::Run {
+                name: "lan".to_owned(),
+                args: ["--bless", "out"].map(str::to_owned).to_vec()
+            }
+        );
+        assert_eq!((lan.name(), lan.args().len()), ("run", 3));
+        let package = parse(&["drive", "package"]);
+        assert_eq!((package.name(), package.args()), ("package", Vec::new()));
         let fails = |argv: &[&str]| command().try_get_matches_from(argv).is_err();
+        assert!(fails(&["drive", "run"]));
+        assert!(fails(&["drive", "package", "x"]));
         assert!(fails(&["drive"]));
         assert!(fails(&["drive", "check", "-p", "x"]));
         assert!(fails(&["drive", "check", "--ci"]));

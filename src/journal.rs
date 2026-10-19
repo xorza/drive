@@ -6,6 +6,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use crate::outcome::Outcome;
 use crate::output::Ci;
+use crate::tool;
 
 /// The run log: one JSON line for each command, with its steps, so the time of the builds, the
 /// tests and the driver itself is measured, not assumed. One file a month, `2026-10.jsonl`.
@@ -84,8 +85,8 @@ impl Journal {
             "error": error,
             "seconds": seconds(elapsed),
             "load_seconds": seconds(self.load),
-            "driver": first_line(Command::new("git").args(["describe", "--always", "--dirty"]).current_dir(env!("CARGO_MANIFEST_DIR"))),
-            "rustc": first_line(Command::new("rustc").arg("-V").current_dir(project)),
+            "driver": tool::first_line(Command::new("git").args(["describe", "--always", "--dirty"]).current_dir(env!("CARGO_MANIFEST_DIR"))),
+            "rustc": tool::first_line(Command::new("rustc").arg("-V").current_dir(project)),
             "os": std::env::consts::OS,
             "arch": std::env::consts::ARCH,
             "cpus": std::thread::available_parallelism().map_or(0, usize::from),
@@ -118,18 +119,6 @@ fn step(outcome: &Outcome) -> serde_json::Value {
 /// Seconds to the millisecond, which is as fine as a step's time means anything.
 fn seconds(duration: Duration) -> f64 {
     (duration.as_secs_f64() * 1000.0).round() / 1000.0
-}
-
-fn first_line(command: &mut Command) -> String {
-    let out = command.output().ok().filter(|o| o.status.success());
-    out.map(|o| {
-        String::from_utf8_lossy(&o.stdout)
-            .lines()
-            .next()
-            .unwrap_or("")
-            .to_owned()
-    })
-    .unwrap_or_default()
 }
 
 impl Utc {

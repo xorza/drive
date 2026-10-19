@@ -104,15 +104,18 @@ impl Root {
             .collect();
         let drive = |m: Option<&serde_json::Value>| m.and_then(|m| m.get("drive")).cloned();
         let manifest = meta.workspace_root.join("Cargo.toml");
+        let members: Vec<Member> = packages.iter().map(|p| Member::new(p, &names)).collect();
         let lanes = Lanes::from_tables(
             drive(meta.metadata.as_ref()),
             drive(root_package.and_then(|p| p.metadata.as_ref())),
             &features,
+            &meta.workspace_root,
+            &members,
         )
         .map_err(|reason| Error::Config { manifest, reason })?;
         Ok(Self {
             repo: Repo::find(&meta.workspace_root),
-            members: packages.iter().map(|p| Member::new(p, &names)).collect(),
+            members,
             unifies_internals: closure(unifying, &normal_dependents).into_iter().collect(),
             dependents,
             target_dir: meta.target_directory,
@@ -135,8 +138,17 @@ impl Root {
     /// among them; `None` when no file is an input.
     pub(crate) fn reach(&self, paths: &[PathBuf], outside: &[&Self]) -> Option<Reach> {
         let mut owners = BTreeSet::new();
+        // The members whose tests read a changed file outside their own folders: their tests
+        // alone, not those of the members that depend on them.
+        let mut readers = BTreeSet::new();
         let mut input = false;
         for path in paths {
+            for reader in &self.lanes.reads {
+                if reader.reads(path) {
+                    input = true;
+                    readers.insert(reader.member.clone());
+                }
+            }
             let nested = outside
                 .iter()
                 .filter(|o| path.starts_with(&o.dir))
@@ -180,7 +192,11 @@ impl Root {
                 _ => return Some(Reach::All),
             }
         }
-        input.then(|| Reach::Members(closure(owners, &self.dependents)))
+        input.then(|| {
+            let mut reached = closure(owners, &self.dependents);
+            reached.extend(readers);
+            Reach::Members(reached)
+        })
     }
 
     /// Whether a file is one the builds and tests read: not in a hidden folder but `.cargo` and
@@ -277,8 +293,8 @@ pub(crate) mod internals {
                     "dependencies": deps, "targets": targets, "features": {}, "metadata": null,
                 })
             };
-            let lib = json!([{ "kind": ["lib"], "doctest": true }]);
-            let bin = json!([{ "kind": ["bin"], "doctest": false }, { "kind": ["bench"], "doctest": false }]);
+            let lib = json!([{ "name": "lib", "kind": ["lib"], "doctest": true }]);
+            let bin = json!([{ "name": "app", "kind": ["bin"], "doctest": false }, { "name": "app", "kind": ["bench"], "doctest": false }]);
             let meta = json!({
                 "packages": [
                     package("core", "/w/core", vec![], lib.clone()),
@@ -304,6 +320,7 @@ pub(crate) mod internals {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::reads::Reader;
 
     fn reach(root: &Root, paths: &[&str], outside: &[&Root]) -> Option<Reach> {
         let paths: Vec<PathBuf> = paths.iter().map(PathBuf::from).collect();
@@ -391,6 +408,31 @@ mod tests {
             None
         );
         assert_eq!(reach(&root, &[], &[]), None);
+    }
+
+    #[test]
+    fn a_reader_s_files_reach_its_tests_alone() {
+        let mut root = Root::fixture();
+        // `check` reads the documents beside the root, and `core` every file of the root.
+        root.lanes.reads = vec![
+            Reader::fixture("check", &["/docs"]),
+            Reader::fixture("core", &["/w"]),
+        ];
+        assert_eq!(
+            reach(&root, &["/docs/design.md"], &[]),
+            Some(members(&["check"]))
+        );
+        // A member's file reaches it and its dependents, and the root's reader of every file;
+        // an agent's instructions, no input of the builds, still reach the reader of them.
+        assert_eq!(
+            reach(&root, &["/w/harness/src/lib.rs"], &[]),
+            Some(members(&["check", "core", "harness"]))
+        );
+        assert_eq!(
+            reach(&root, &["/w/AGENTS.md"], &[]),
+            Some(members(&["core"]))
+        );
+        assert_eq!(reach(&root, &["/elsewhere/x.rs"], &[]), None);
     }
 
     #[test]

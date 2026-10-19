@@ -37,3 +37,16 @@ fn file_stem(command: &Command) -> String {
         .to_string_lossy()
         .into_owned()
 }
+
+/// The first line of what `command` prints, as a tool's version; empty when it does not run or
+/// fails, which no check then tells from another version.
+pub(crate) fn first_line(command: &mut Command) -> String {
+    let out = command.output().ok().filter(|o| o.status.success());
+    out.map_or_default(|o| {
+        String::from_utf8_lossy(&o.stdout)
+            .lines()
+            .next()
+            .unwrap_or("")
+            .to_owned()
+    })
+}

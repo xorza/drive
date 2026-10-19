@@ -47,6 +47,7 @@ pub(crate) enum DependencyKind {
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct Target {
+    pub(crate) name: String,
     pub(crate) kind: Vec<TargetKind>,
     pub(crate) doctest: bool,
 }
@@ -59,6 +60,7 @@ pub(crate) enum TargetKind {
     Dylib,
     ProcMacro,
     Bench,
+    Bin,
     #[serde(other)]
     Other,
 }

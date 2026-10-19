@@ -11,7 +11,7 @@ use crate::output::{self, Ci};
 use crate::passes::{Passes, Snapshot};
 use crate::project::Project;
 use crate::root::{Reach, Root};
-use crate::step::{Kind, Runs, Step};
+use crate::step::{Kind, Program, Runs, Step};
 use crate::tool;
 
 /// Whether a command reuses and keeps the passes of its steps.
@@ -196,10 +196,11 @@ impl<'p> Runner<'p> {
         let mut run = step.clone();
         let mut note = String::new();
         if let Some(paths) = change
-            && step.runs == Runs::OnChange
+            && step.runs != Runs::Always
         {
             match root.reach(&paths, &self.project.outside(root)) {
                 None => return self.reuse(step, key, snapshot, "no input changed since it passed"),
+                Some(_) if step.runs == Runs::OnInput => {}
                 Some(Reach::Members(reached)) if step.kind == Kind::Nextest => {
                     let hit: Vec<&str> = root
                         .members
@@ -238,7 +239,9 @@ impl<'p> Runner<'p> {
             }
         }
         let outcome = self.execute(root, &run, &note)?;
-        if outcome.status == Status::Ok && self.snapshot(root)?.as_ref() == Some(&snapshot) {
+        let keeps = step.shared.as_ref().is_none_or(|shared| shared.last);
+        if keeps && outcome.status == Status::Ok && self.snapshot(root)?.as_ref() == Some(&snapshot)
+        {
             self.passes
                 .as_mut()
                 .expect("checked above")
@@ -267,7 +270,17 @@ impl<'p> Runner<'p> {
         let aside = log.with_file_name(format!("{}-{}.tmp", step.log_name(), std::process::id()));
         let io = |path: PathBuf| move |source| Error::Io { path, source };
         let file = File::create(&aside).map_err(io(aside.clone()))?;
-        let mut command = tool::cargo();
+        let mut command = match &step.program {
+            Program::Cargo => tool::cargo(),
+            Program::Other(path) => Command::new(path),
+            Program::Copy { from, to } => {
+                let started = Instant::now();
+                let copied = copy(from, to);
+                drop(file);
+                std::fs::rename(&aside, &log).map_err(io(log.clone()))?;
+                return Ok(Outcome::copied(step, copied, started.elapsed(), log));
+            }
+        };
         command.args(&step.argv).current_dir(&root.dir);
         for (name, value) in &step.env {
             match value {
@@ -290,7 +303,7 @@ impl<'p> Runner<'p> {
             &mut self.shown,
         )
         .map_err(|source| Error::Spawn {
-            program: format!("cargo {}", step.argv[0]),
+            program: step.program_name(),
             source,
         })?;
         let elapsed = started.elapsed();
@@ -382,12 +395,18 @@ impl<'p> Runner<'p> {
     fn key(&mut self, root: &Root, step: &Step) -> String {
         let rustc = self
             .rustc
-            .get_or_insert_with(|| version(Command::new("rustc").arg("-V"), &root.dir))
+            .get_or_insert_with(|| {
+                tool::first_line(Command::new("rustc").arg("-V").current_dir(&root.dir))
+            })
             .clone();
         let mut tools = vec![rustc];
         if step.kind == Kind::Nextest {
             let nextest = self.nextest.get_or_insert_with(|| {
-                version(tool::cargo().args(["nextest", "--version"]), &root.dir)
+                tool::first_line(
+                    tool::cargo()
+                        .args(["nextest", "--version"])
+                        .current_dir(&root.dir),
+                )
             });
             tools.push(nextest.clone());
         }
@@ -395,22 +414,34 @@ impl<'p> Runner<'p> {
             .filter(|(name, _)| name.starts_with("RUST") || name.starts_with("CARGO"))
             .map(|(name, value)| (name, Some(value)))
             .collect();
+        // The steps of one command share its identity, which holds each step's own variables.
+        if let Some(shared) = &step.shared {
+            return serde_json::json!([root.dir, shared.command, env, tools[0]]).to_string();
+        }
         env.extend(step.env.iter().cloned());
         let identity = serde_json::json!([root.dir, step.argv, env, tools]);
         identity.to_string()
     }
 }
 
-fn version(command: &mut Command, dir: &Path) -> String {
-    let out = command.current_dir(dir).output();
-    out.map(|o| {
-        String::from_utf8_lossy(&o.stdout)
-            .lines()
-            .next()
-            .unwrap_or("")
-            .to_owned()
-    })
-    .unwrap_or_default()
+/// Puts a copy of `from`, a file or a folder with all it holds, at `to`, in place of what is
+/// there.
+fn copy(from: &Path, to: &Path) -> std::io::Result<()> {
+    match std::fs::symlink_metadata(to) {
+        Ok(there) if there.is_dir() => std::fs::remove_dir_all(to)?,
+        Ok(_) => std::fs::remove_file(to)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    if !from.is_dir() {
+        return std::fs::copy(from, to).map(|_| ());
+    }
+    std::fs::create_dir_all(to)?;
+    for entry in std::fs::read_dir(from)? {
+        let entry = entry?;
+        copy(&entry.path(), &to.join(entry.file_name()))?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

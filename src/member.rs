@@ -10,6 +10,8 @@ pub(crate) struct Member {
     /// A library target rustdoc runs doc tests on.
     pub(crate) doctest: bool,
     pub(crate) benches: bool,
+    /// The names of its binary targets.
+    pub(crate) binaries: Vec<String>,
     /// The folders of its path dependencies outside the workspace.
     pub(crate) outside: Vec<PathBuf>,
 }
@@ -28,6 +30,11 @@ impl Member {
                 .iter()
                 .any(|t| t.doctest && t.kind.iter().any(|k| k.is_library())),
             benches: targets.iter().any(|t| t.kind.contains(&TargetKind::Bench)),
+            binaries: targets
+                .iter()
+                .filter(|t| t.kind.contains(&TargetKind::Bin))
+                .map(|t| t.name.clone())
+                .collect(),
             outside: package
                 .dependencies
                 .iter()

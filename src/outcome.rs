@@ -1,6 +1,8 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
+use crate::step::Step;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Status {
     Ok,
@@ -45,6 +47,24 @@ impl Outcome {
     /// A step that did not run, as an earlier one failed.
     pub(crate) fn skipped(name: &str, note: String) -> Self {
         Self::not_run(name, Status::Skip, note)
+    }
+
+    /// A copy the driver made itself, which `copied` says came out, in `elapsed`, logged in `log`.
+    pub(crate) fn copied(
+        step: &Step,
+        copied: std::io::Result<()>,
+        elapsed: Duration,
+        log: PathBuf,
+    ) -> Self {
+        let (status, note) = match copied {
+            Ok(()) => (Status::Ok, String::new()),
+            Err(error) => (Status::Fail, format!("{}: {error}", step.program_name())),
+        };
+        Self {
+            elapsed,
+            log: Some(log),
+            ..Self::not_run(&step.name, status, note)
+        }
     }
 
     /// A step that passed on these inputs before, so it did not run.
