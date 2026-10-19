@@ -185,60 +185,30 @@ impl<'p> Runner<'p> {
     /// while the step ran.
     fn step(&mut self, root: &Root, step: &Step) -> Result<Outcome> {
         if self.passes.is_none() {
-            return self.execute(root, step, "");
+            return self.execute(root, step);
         }
         let Some(snapshot) = self.snapshot(root)? else {
-            return self.execute(root, step, "");
+            return self.execute(root, step);
         };
         let key = self.key(root, step);
         let last = self.passes.as_ref().and_then(|p| p.get(&key)).cloned();
         let change = last.and_then(|last| self.changed(&last, &snapshot));
         let mut run = step.clone();
-        let mut note = String::new();
         if let Some(paths) = change
             && step.runs != Runs::Always
         {
             match root.reach(&paths, &self.project.outside(root)) {
                 None => return self.reuse(step, key, snapshot, "no input changed since it passed"),
-                Some(_) if step.runs == Runs::OnInput => {}
-                Some(Reach::Members(reached)) if step.kind == Kind::Nextest => {
-                    let hit: Vec<&str> = root
-                        .members
-                        .iter()
-                        .map(|m| m.name.as_str())
-                        .filter(|n| reached.contains(*n))
-                        .collect();
-                    if hit.is_empty() {
+                Some(Reach::Members(reached)) if step.runs == Runs::OnChange => {
+                    let Some(narrowed) = step.for_reach(root, &reached) else {
                         return self.reuse(step, key, snapshot, "no change reaches its tests");
-                    }
-                    if hit.len() < root.members.len() {
-                        note = format!(
-                            "the tests of {} of {} crates",
-                            hit.len(),
-                            root.members.len()
-                        );
-                        run = step.narrowed(hit);
-                    }
-                }
-                // `cargo test` selects crates only through `-p`, which builds another shape.
-                Some(Reach::Members(reached)) if step.kind == Kind::CargoTest => {
-                    if !root.members.iter().any(|m| reached.contains(&m.name)) {
-                        return self.reuse(step, key, snapshot, "no change reaches its tests");
-                    }
-                }
-                Some(Reach::Members(reached)) if step.kind == Kind::Doctests => {
-                    if !root
-                        .members
-                        .iter()
-                        .any(|m| m.doctest && reached.contains(&m.name))
-                    {
-                        return self.reuse(step, key, snapshot, "no change reaches its doc tests");
-                    }
+                    };
+                    run = narrowed;
                 }
                 Some(_) => {}
             }
         }
-        let outcome = self.execute(root, &run, &note)?;
+        let outcome = self.execute(root, &run)?;
         let keeps = step.shared.as_ref().is_none_or(|shared| shared.last);
         if keeps && outcome.status == Status::Ok && self.snapshot(root)?.as_ref() == Some(&snapshot)
         {
@@ -264,7 +234,7 @@ impl<'p> Runner<'p> {
         Ok(Outcome::reused(&step.name, note.to_owned()))
     }
 
-    fn execute(&mut self, root: &Root, step: &Step, note: &str) -> Result<Outcome> {
+    fn execute(&mut self, root: &Root, step: &Step) -> Result<Outcome> {
         let log = self.own.join("log").join(step.log_name());
         // Written aside and moved in whole, so a run beside this one leaves each log whole.
         let aside = log.with_file_name(format!("{}-{}.tmp", step.log_name(), std::process::id()));
@@ -319,7 +289,7 @@ impl<'p> Runner<'p> {
         // A lint that fails with no diagnostic failed before rustc ran: no build gets further.
         let broken = report.hard > 0
             || (status == Status::Fail && step.kind == Kind::Check && report.errors == 0);
-        let mut notes: Vec<String> = [note, step.label.as_str(), report.summary.as_str()]
+        let mut notes: Vec<String> = [step.label.as_str(), report.summary.as_str()]
             .into_iter()
             .filter(|n| !n.is_empty())
             .map(str::to_owned)

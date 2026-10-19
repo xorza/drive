@@ -7,7 +7,8 @@ pub(crate) enum Sweep {
     /// The check after a change: fmt, and a lint of every target with every feature, to the first
     /// failure.
     Check,
-    /// Every lane: fmt, a lint with each set of the root, ship, the tests, and rustdoc and the doc
+    /// Every lane: fmt, a lint with each set of the root, ship, the lints of other OSes, the
+    /// tests, the root's commands that join it, and the build of every bench, rustdoc and the doc
     /// tests where the root asks for them, to the first failure.
     Gate,
     /// Every lane for CI, which can change no file and reports every failure of one run.

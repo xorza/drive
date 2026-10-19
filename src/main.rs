@@ -27,6 +27,7 @@ mod cli;
 mod error;
 mod flag_set;
 mod git;
+mod invocation;
 mod journal;
 mod lanes;
 mod member;
@@ -49,12 +50,12 @@ use std::process::ExitCode;
 
 use crate::cli::Task;
 use crate::error::{Error, Result};
+use crate::invocation::Invocation;
 use crate::journal::{End, Journal};
 use crate::output::Ci;
 use crate::project::Project;
-use crate::runner::{Finished, OnFail, Plan, Reuse, Runner};
-use crate::step::{Format, Runs, Step};
-use crate::sweep::Sweep;
+use crate::runner::{Finished, Runner};
+use crate::step::Format;
 
 fn main() -> ExitCode {
     let task = Task::parse();
@@ -115,80 +116,6 @@ fn run(task: &Task, top: &Path, ci: Ci, journal: &mut Journal) -> Result<Finishe
     }
     let project = Project::load(top)?;
     journal.loaded();
-    let root = project.top();
-    match task {
-        Task::Sweep(sweep) => every_root(&project, ci, *sweep),
-        Task::Test(args) => {
-            let mut steps = Step::test_command(root, args);
-            // nextest's arguments select no doc test; a whole run keeps its pass for `gate`, with
-            // the doc tests where it runs them.
-            let reuse = if args.is_empty() {
-                if root.lanes.docs {
-                    steps.extend(Step::doctests(root, Runs::Always));
-                }
-                Reuse::Passes
-            } else {
-                Reuse::Never
-            };
-            Ok(Runner::new(&project, ci, reuse)?.run(&[Plan { root, steps }], OnFail::Continue))
-        }
-        Task::Run { name, args } => {
-            let command = root
-                .lanes
-                .command(name)
-                .ok_or_else(|| Error::UnknownCommand {
-                    name: name.clone(),
-                    known: root.lanes.commands.iter().map(|c| c.name.clone()).collect(),
-                })?;
-            if !args.is_empty() && !command.takes_args() {
-                return Err(Error::ArgsRefused {
-                    command: name.clone(),
-                });
-            }
-            let steps = Step::command(root, command, args, Runs::Always);
-            // Its passes stay for the commands it joins.
-            Ok(
-                Runner::new(&project, ci, Reuse::Passes)?
-                    .run(&[Plan { root, steps }], OnFail::Stop),
-            )
-        }
-        Task::Package => {
-            if root.lanes.package.is_empty() {
-                return Err(Error::NothingToPackage {
-                    dir: root.dir.clone(),
-                });
-            }
-            let out = root.target_dir.join("package");
-            std::fs::create_dir_all(&out).map_err(|source| Error::Io {
-                path: out.clone(),
-                source,
-            })?;
-            let steps = Step::package(root, &out);
-            Ok(Runner::new(&project, ci, Reuse::Never)?.run(&[Plan { root, steps }], OnFail::Stop))
-        }
-        Task::Bench(args) => {
-            let step = Step::bench(root, args).ok_or_else(|| Error::NoBenches {
-                dir: root.dir.clone(),
-            })?;
-            Ok(Runner::new(&project, ci, Reuse::Never)?.run(
-                &[Plan {
-                    root,
-                    steps: vec![step],
-                }],
-                OnFail::Continue,
-            ))
-        }
-    }
-}
-
-fn every_root(project: &Project, ci: Ci, sweep: Sweep) -> Result<Finished> {
-    let plans: Vec<Plan<'_>> = project
-        .roots()
-        .iter()
-        .map(|r| Plan {
-            root: r,
-            steps: Step::every(r, sweep),
-        })
-        .collect();
-    Ok(Runner::new(project, ci, Reuse::Passes)?.run(&plans, sweep.on_fail()))
+    let invocation = Invocation::new(task, &project)?;
+    Ok(Runner::new(&project, ci, invocation.reuse)?.run(&invocation.plans, invocation.on_fail))
 }

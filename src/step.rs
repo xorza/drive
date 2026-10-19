@@ -1,8 +1,10 @@
+use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use crate::flag_set::FlagSet;
 use crate::lanes::TestRunner;
+use crate::member::Member;
 use crate::platform::{self, SplitBy};
 use crate::project_command::{CommandStep, Joins, ProjectCommand, StepWhat};
 use crate::root::Root;
@@ -13,6 +15,9 @@ use crate::sweep::Sweep;
 const JSON: &str = "--message-format=json-diagnostic-short";
 /// Clippy's arguments after `--` are in each unit's fingerprint, so every lint passes these.
 const DENY: [&str; 3] = ["--", "-D", "warnings"];
+/// The bench targets alone: `--benches` also selects each library and binary, whose `bench` flag
+/// is on by default, and hands them the bench binaries' arguments.
+const EVERY_BENCH: [&str; 2] = ["--bench", "*"];
 const QUIET_NEXTEST: [&str; 10] = [
     "--show-progress",
     "none",
@@ -99,7 +104,7 @@ pub(crate) struct Step {
     /// Variables set, or removed for `None`.
     pub(crate) env: Vec<(String, Option<String>)>,
     pub(crate) runs: Runs,
-    /// The flags the step's line names.
+    /// What the step's line names: its flags, and the crates a narrowed run tests.
     pub(crate) label: String,
     /// The pass it shares with the other steps of its project command, which runs whole or not
     /// at all: a later step reads what an earlier one built, which a step between them, as the
@@ -153,21 +158,24 @@ impl Step {
 
     pub(crate) fn lints(root: &Root, sets: &[FlagSet]) -> Vec<Self> {
         let lane = |(i, set): (usize, &FlagSet)| {
-            let mut argv = vec!["clippy", "--workspace", "--all-targets"];
-            argv.extend(set.args());
-            argv.extend(["--locked", "--keep-going", JSON]);
-            argv.extend(DENY);
-            Self {
-                label: set.label(),
-                ..Self::new(
-                    root,
-                    &Self::numbered("lint", i, sets.len()),
-                    Kind::Check,
-                    argv,
-                )
-            }
+            Self::lint(root, &Self::numbered("lint", i, sets.len()), set, None)
         };
         sets.iter().enumerate().map(lane).collect()
+    }
+
+    /// The lint of every target under `set`, for `target`, or for the host's with none.
+    fn lint(root: &Root, name: &str, set: &FlagSet, target: Option<&str>) -> Self {
+        let mut argv = vec!["clippy", "--workspace", "--all-targets"];
+        argv.extend(set.args());
+        argv.extend(["--locked", "--keep-going", JSON]);
+        if let Some(target) = target {
+            argv.extend(["--target", target]);
+        }
+        argv.extend(DENY);
+        Self {
+            label: set.label(),
+            ..Self::new(root, name, Kind::Check, argv)
+        }
     }
 
     /// The build that ships, with default features. A member that turns `internals` on through a
@@ -200,45 +208,67 @@ impl Step {
         }
     }
 
-    /// One step per test lane, each with `extra`, the runner's arguments: nextest's, or the test
-    /// binaries' under `cargo test`.
+    /// One step per test lane, each with `extra`.
     pub(crate) fn tests(root: &Root, extra: &[String], runs: Runs) -> Vec<Self> {
         let sets = &root.lanes.test;
-        let lane = |(i, set): (usize, &FlagSet)| {
-            let (kind, mut argv) = match root.lanes.test_runner {
-                TestRunner::Nextest => (Kind::Nextest, vec!["nextest", "run", "--workspace"]),
-                TestRunner::CargoTest => (Kind::CargoTest, vec!["test", "--workspace"]),
-            };
-            argv.extend(set.args());
-            match root.lanes.test_runner {
-                TestRunner::Nextest => {
-                    argv.extend([
-                        "--locked",
-                        "--cargo-message-format",
-                        "json-diagnostic-short",
-                    ]);
-                    argv.extend(QUIET_NEXTEST);
-                }
-                TestRunner::CargoTest => {
-                    // The doc tests are a lane of their own.
-                    if set.targets.is_empty() {
-                        argv.push("--tests");
-                    }
-                    argv.extend(["--locked", JSON]);
-                    if !extra.is_empty() {
-                        argv.push("--");
-                    }
-                }
-            }
-            argv.extend(extra.iter().map(String::as_str));
-            let step = Self::new(root, &Self::numbered("tests", i, sets.len()), kind, argv);
-            Self {
-                runs,
-                label: set.label(),
-                ..step
-            }
+        let lane = |(i, set): (usize, &FlagSet)| Self {
+            runs,
+            ..Self::test_lane(root, &Self::numbered("tests", i, sets.len()), set, extra)
         };
         sets.iter().enumerate().map(lane).collect()
+    }
+
+    /// The tests of `set`, with `extra`, the runner's arguments: nextest's, or the test binaries'
+    /// under `cargo test`.
+    fn test_lane(root: &Root, name: &str, set: &FlagSet, extra: &[String]) -> Self {
+        let (kind, mut argv) = match root.lanes.test_runner {
+            TestRunner::Nextest => (Kind::Nextest, vec!["nextest", "run", "--workspace"]),
+            TestRunner::CargoTest => (Kind::CargoTest, vec!["test", "--workspace"]),
+        };
+        argv.extend(set.args());
+        match root.lanes.test_runner {
+            TestRunner::Nextest => {
+                argv.extend([
+                    "--locked",
+                    "--cargo-message-format",
+                    "json-diagnostic-short",
+                ]);
+                argv.extend(QUIET_NEXTEST);
+            }
+            TestRunner::CargoTest => {
+                // The doc tests are a lane of their own.
+                if set.targets.is_empty() {
+                    argv.push("--tests");
+                }
+                argv.extend(["--locked", JSON]);
+                if !extra.is_empty() {
+                    argv.push("--");
+                }
+            }
+        }
+        argv.extend(extra.iter().map(String::as_str));
+        Self {
+            label: set.label(),
+            ..Self::new(root, name, kind, argv)
+        }
+    }
+
+    /// The gate's build of every bench, which runs none: the dev profile and the first test
+    /// lane's features build no unit the tests did not but the benches' own, where the bench
+    /// profile links each bench again with the release's LTO.
+    pub(crate) fn gate_benches(root: &Root) -> Option<Self> {
+        if !root.members.iter().any(|m| m.benches) {
+            return None;
+        }
+        let set = root.lanes.test[0].features_only();
+        let mut argv = vec!["build", "--workspace"];
+        argv.extend(EVERY_BENCH);
+        argv.extend(set.args());
+        argv.extend(["--locked", JSON]);
+        Some(Self {
+            label: set.label(),
+            ..Self::new(root, "benches", Kind::Check, argv)
+        })
     }
 
     /// The doc tests, under the first test lane's features: targets select test binaries.
@@ -273,7 +303,7 @@ impl Step {
         for name in benches {
             argv.extend(["-p", name]);
         }
-        argv.push("--benches");
+        argv.extend(EVERY_BENCH);
         argv.extend(root.lanes.bench.args());
         if !extra.is_empty() {
             argv.push("--");
@@ -292,14 +322,10 @@ impl Step {
     pub(crate) fn cross_lints(root: &Root) -> Vec<Self> {
         let targets = &root.lanes.cross_lint;
         let lane = |(i, target): (usize, &String)| {
-            let mut step = Self::lints(root, &[FlagSet::all_features()]).remove(0);
-            let at = step.argv.len() - DENY.len();
-            step.argv
-                .splice(at..at, [OsString::from("--target"), OsString::from(target)]);
+            let name = Self::numbered("cross", i, targets.len());
             Self {
-                name: root.step_name(&Self::numbered("cross", i, targets.len())),
                 label: target.clone(),
-                ..step
+                ..Self::lint(root, &name, &FlagSet::all_features(), Some(target))
             }
         };
         targets.iter().enumerate().map(lane).collect()
@@ -353,11 +379,10 @@ impl Step {
                     }
                 }
                 StepWhat::Tests(filter) => {
-                    let mut lane = Self::tests(root, given, Runs::Always).remove(0);
+                    let mut lane = Self::test_lane(root, &name, &root.lanes.test[0], given);
                     lane.argv
                         .extend([OsString::from("-E"), OsString::from(filter)]);
                     Self {
-                        name: root.step_name(&name),
                         label: String::new(),
                         ..lane
                     }
@@ -443,7 +468,7 @@ impl Step {
 
     /// The steps of `sweep`, the lints first, as they answer in seconds, and the docs last. A
     /// local gate lints the targets of other OSes after the host's, as CI lints each on its own
-    /// OS; the gate's own commands and its run of each bench case follow the tests.
+    /// OS; the gate's own commands and its build of every bench follow the tests.
     pub(crate) fn every(root: &Root, sweep: Sweep) -> Vec<Self> {
         let mut steps = vec![Self::fmt(root, sweep.format())];
         match sweep {
@@ -456,14 +481,8 @@ impl Step {
                 }
                 steps.extend(Self::tests(root, &[], Runs::OnChange));
                 steps.extend(Self::joined(root, Joins::Gate));
-                if root.lanes.gate_benches
-                    && let Some(bench) = Self::bench(root, &["--test".to_owned()])
-                {
-                    steps.push(Self {
-                        name: root.step_name("benches"),
-                        runs: Runs::OnInput,
-                        ..bench
-                    });
+                if root.lanes.gate_benches {
+                    steps.extend(Self::gate_benches(root));
                 }
                 if root.lanes.docs {
                     steps.push(Self::doc(root));
@@ -486,22 +505,52 @@ impl Step {
         }
     }
 
-    /// This test step, running only the tests of `members`. Nextest unites its filters, so a
-    /// narrowed step can hold no filter of its own.
-    pub(crate) fn narrowed<'a>(&self, members: impl IntoIterator<Item = &'a str>) -> Self {
-        debug_assert!(self.kind == Kind::Nextest && !self.argv.iter().any(|a| a == "-E"));
-        let expression: Vec<String> = members
-            .into_iter()
-            .map(|m| format!("package(={m})"))
+    /// What a change that reaches the members `reached` leaves of this step to run: nothing when
+    /// it reaches none of the members whose tests the step runs, a nextest run narrowed to the
+    /// ones it reaches, or the step whole. `cargo test` selects crates only through `-p`, which
+    /// builds another shape.
+    pub(crate) fn for_reach(&self, root: &Root, reached: &BTreeSet<String>) -> Option<Self> {
+        let tested: fn(&Member) -> bool = match self.kind {
+            Kind::Nextest | Kind::CargoTest => |_| true,
+            Kind::Doctests => |member| member.doctest,
+            Kind::Format | Kind::Check | Kind::Program => return Some(self.clone()),
+        };
+        let tests: Vec<&str> = (root.members.iter())
+            .filter(|m| tested(m))
+            .map(|m| m.name.as_str())
             .collect();
+        let hit: Vec<&str> = (tests.iter().copied())
+            .filter(|name| reached.contains(*name))
+            .collect();
+        if hit.is_empty() {
+            None
+        } else if self.kind == Kind::Nextest && hit.len() < tests.len() {
+            Some(self.narrowed(&hit, tests.len()))
+        } else {
+            Some(self.clone())
+        }
+    }
+
+    /// This nextest step, running only the tests of `members`, of the `of` it runs whole.
+    /// Nextest unites its filters, so a narrowed step can hold no filter of its own.
+    fn narrowed(&self, members: &[&str], of: usize) -> Self {
+        debug_assert!(self.kind == Kind::Nextest && !self.argv.iter().any(|a| a == "-E"));
+        let expression: Vec<String> = members.iter().map(|m| format!("package(={m})")).collect();
         let mut argv = self.argv.clone();
         argv.extend([
             OsString::from("-E"),
             OsString::from(expression.join(" | ")),
             OsString::from("--no-tests=pass"),
         ]);
+        let tested = format!("the tests of {} of {of} crates", members.len());
+        let label = if self.label.is_empty() {
+            tested
+        } else {
+            format!("{tested}; {}", self.label)
+        };
         Self {
             argv,
+            label,
             ..self.clone()
         }
     }
@@ -581,7 +630,6 @@ mod tests {
         assert_eq!(tests[0].runs, Runs::Always);
         assert!(join(&tests[0]).starts_with("nextest run --workspace --all-features --locked"));
         assert!(join(&tests[0]).ends_with("--success-output never name"));
-        let narrowed = Step::tests(&root, &[], Runs::OnChange)[0].narrowed(["app", "core"]);
         let mut cargo_test = Root::fixture();
         cargo_test.lanes.test_runner = TestRunner::CargoTest;
         let libtest = Step::tests(&cargo_test, &["name".to_owned()], Runs::OnChange);
@@ -590,7 +638,6 @@ mod tests {
             join(&libtest[0]),
             "test --workspace --all-features --tests --locked --message-format=json-diagnostic-short -- name"
         );
-        assert!(join(&narrowed).ends_with("-E package(=app) | package(=core) --no-tests=pass"));
 
         assert_eq!(
             join(&Step::doctests(&root, Runs::OnChange).unwrap()),
@@ -598,8 +645,46 @@ mod tests {
         );
         assert_eq!(
             join(&Step::bench(&root, &["--test".to_owned()]).unwrap()),
-            "bench --locked -p app --benches -- --test"
+            "bench --locked -p app --bench * -- --test"
         );
+    }
+
+    #[test]
+    fn a_change_narrows_only_the_test_steps_it_reaches() {
+        // The fixture's members in order: `core` and `harness` with doc tests, `app`, `check`.
+        let root = Root::fixture();
+        let reached =
+            |names: &[&str]| -> BTreeSet<String> { names.iter().map(|&n| n.to_owned()).collect() };
+        let tests = Step::tests(&root, &[], Runs::OnChange).remove(0);
+        let narrowed = tests.for_reach(&root, &reached(&["app", "core"])).unwrap();
+        assert!(
+            words(&narrowed)
+                .join(" ")
+                .ends_with("-E package(=core) | package(=app) --no-tests=pass")
+        );
+        assert_eq!(narrowed.label, "the tests of 2 of 4 crates; --all-features");
+        let all = reached(&["core", "app", "harness", "check"]);
+        assert_eq!(tests.for_reach(&root, &all), Some(tests.clone()));
+        assert_eq!(tests.for_reach(&root, &reached(&["gui"])), None);
+
+        // The doc tests count only the members that have them, and run whole.
+        let doctests = Step::doctests(&root, Runs::OnChange).unwrap();
+        assert_eq!(doctests.for_reach(&root, &reached(&["app"])), None);
+        assert_eq!(
+            doctests.for_reach(&root, &reached(&["harness"])),
+            Some(doctests)
+        );
+        let mut cargo_test = Root::fixture();
+        cargo_test.lanes.test_runner = TestRunner::CargoTest;
+        let libtest = Step::tests(&cargo_test, &[], Runs::OnChange).remove(0);
+        assert_eq!(
+            libtest.for_reach(&cargo_test, &reached(&["check"])),
+            Some(libtest.clone())
+        );
+        assert_eq!(libtest.for_reach(&cargo_test, &reached(&[])), None);
+        // A step that runs no member's tests runs whole whatever the change reaches.
+        let lint = Step::lints(&root, &[FlagSet::all_features()]).remove(0);
+        assert_eq!(lint.for_reach(&root, &reached(&[])), Some(lint));
     }
 
     /// A command of `steps`, a table's, joining `joins`.
@@ -732,12 +817,38 @@ mod tests {
                 "x86_64-pc-windows-gnu"
             )
         );
+        // The gate builds the bench targets alone, under the first test lane's features and not
+        // the bench lane's, with none of its targets, and runs no case.
         assert_eq!(
-            (words(&every[6]).join(" "), every[6].runs),
             (
-                "bench --locked -p app --benches -- --test".to_owned(),
-                Runs::OnInput
+                words(&every[6]).join(" "),
+                every[6].kind,
+                every[6].label.as_str()
+            ),
+            (
+                "build --workspace --bench * --all-features --locked \
+                 --message-format=json-diagnostic-short"
+                    .to_owned(),
+                Kind::Check,
+                "--all-features"
             )
+        );
+        root.lanes.bench = FlagSet::all_features();
+        root.lanes.test[0] = FlagSet {
+            features: vec!["--features".to_owned(), "golden".to_owned()],
+            targets: vec!["--lib".to_owned()],
+            but: Vec::new(),
+        };
+        assert_eq!(
+            words(&Step::gate_benches(&root).unwrap()).join(" "),
+            "build --workspace --bench * --features golden --locked \
+             --message-format=json-diagnostic-short"
+        );
+        root.members.iter_mut().for_each(|m| m.benches = false);
+        assert_eq!(Step::gate_benches(&root), None);
+        assert_eq!(
+            names(Step::every(&root, Sweep::GateCi)).last().unwrap(),
+            "lan"
         );
     }
 

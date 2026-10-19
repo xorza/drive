@@ -103,8 +103,10 @@ fn command() -> Command {
         .subcommand(
             Command::new("gate")
                 .about(
-                    "Every step CI runs: fmt, each lint set, ship, the tests, and rustdoc and the \
-                     doc tests where `docs = true`; the first failure ends it",
+                    "Every step CI runs: fmt, each lint set, ship, the lints of other OSes, the \
+                     tests, the root's commands that join it, and the build of every bench, \
+                     rustdoc and the doc tests where the drive table asks; the first failure \
+                     ends it",
                 )
                 .arg(
                     Arg::new("ci")
