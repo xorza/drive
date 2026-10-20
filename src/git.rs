@@ -15,15 +15,23 @@ pub(crate) struct Repo {
 impl Repo {
     /// The repository that holds `dir`; `None` outside git.
     pub(crate) fn find(dir: &Path) -> Option<Self> {
-        let top = git(dir, &["rev-parse", "--show-toplevel"], &[])?;
-        let index = git(
+        let paths = git(
             dir,
-            &["rev-parse", "--path-format=absolute", "--git-path", "index"],
+            &[
+                "rev-parse",
+                "--path-format=absolute",
+                "--show-toplevel",
+                "--git-path",
+                "index",
+            ],
             &[],
         )?;
+        // One line for each option, in their order.
+        let mut lines = paths.lines();
+        let (top, index) = (lines.next()?, lines.next()?);
         Some(Self {
-            top: PathBuf::from(top.trim()),
-            index: PathBuf::from(index.trim()),
+            top: PathBuf::from(top),
+            index: PathBuf::from(index),
         })
     }
 
@@ -96,6 +104,12 @@ mod tests {
         std::fs::write(dir.join("a.rs"), "a").unwrap();
         std::fs::write(dir.join(".gitignore"), "ignored\n").unwrap();
         let repo = Repo::find(&dir).unwrap();
+        let top = PathBuf::from(
+            git(&dir, &["rev-parse", "--show-toplevel"], &[])
+                .unwrap()
+                .trim(),
+        );
+        assert_eq!((&repo.top, &repo.index), (&top, &top.join(".git/index")));
         let scratch = dir.join("scratch-index");
 
         // Nothing is staged, so the repository has no index yet; new files count all the same.

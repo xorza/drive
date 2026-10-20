@@ -32,6 +32,22 @@ impl Task {
         }
     }
 
+    /// What the verdict calls the command: `check`, `run lan`.
+    pub(crate) fn title(&self) -> String {
+        match self {
+            Self::Run { name, .. } => format!("run {name}"),
+            _ => self.name().to_owned(),
+        }
+    }
+
+    /// The name of the file that holds what the run printed: `last-check.txt`,
+    /// `last-run-lan.txt`.
+    pub(crate) fn output_file(&self) -> String {
+        let title = self.title();
+        let name = title.replace(|c: char| !c.is_ascii_alphanumeric() && c != '_', "-");
+        format!("last-{name}.txt")
+    }
+
     pub(crate) fn args(&self) -> Vec<String> {
         match self {
             Self::Test(args) | Self::Bench(args) => args.clone(),
@@ -192,7 +208,20 @@ mod tests {
                 args: ["--bless", "out"].map(str::to_owned).to_vec()
             }
         );
-        assert_eq!((lan.name(), lan.args().len()), ("run", 3));
+        assert_eq!(
+            (lan.name(), lan.title(), lan.args().len()),
+            ("run", "run lan".to_owned(), 3)
+        );
+        assert_eq!(gate.title(), "gate");
+        assert_eq!(lan.output_file(), "last-run-lan.txt");
+        let odd = Task::Run {
+            name: "a/b c".to_owned(),
+            args: Vec::new(),
+        };
+        assert_eq!(
+            (odd.title(), odd.output_file()),
+            ("run a/b c".to_owned(), "last-run-a-b-c.txt".to_owned())
+        );
         let package = parse(&["cargo-drive", "drive", "package"]);
         assert_eq!((package.name(), package.args()), ("package", Vec::new()));
         let fails = |argv: &[&str]| command().try_get_matches_from(argv).is_err();

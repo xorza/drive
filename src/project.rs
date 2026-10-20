@@ -12,8 +12,10 @@ pub(crate) struct Project {
 }
 
 impl Project {
-    pub(crate) fn load(top: &Path) -> Result<Self> {
-        let mut roots = vec![Root::load(top, String::new())?];
+    /// The workspace that holds `dir`, and the roots outside it that it reaches.
+    pub(crate) fn load(dir: &Path) -> Result<Self> {
+        let mut roots = vec![Root::load(dir)?];
+        let top = roots[0].dir.clone();
         let mut next = 0;
         while next < roots.len() {
             let outside: Vec<PathBuf> = roots[next]
@@ -25,17 +27,16 @@ impl Project {
                 if roots.iter().any(|r| r.holds(&dir)) {
                     continue;
                 }
-                let found = Root::workspace_of(&dir)?;
-                if roots.iter().all(|r| r.dir != found) {
-                    let label = found
-                        .strip_prefix(top)
-                        .unwrap_or_else(|_| Path::new(found.file_name().unwrap_or_default()));
-                    let label = label
+                let mut found = Root::load(&dir)?;
+                if roots.iter().all(|r| r.dir != found.dir) {
+                    let label = (found.dir.strip_prefix(&top))
+                        .unwrap_or_else(|_| Path::new(found.dir.file_name().unwrap_or_default()));
+                    found.label = label
                         .components()
                         .map(|c| c.as_os_str().to_string_lossy())
                         .collect::<Vec<_>>()
                         .join("/");
-                    roots.push(Root::load(&found, label)?);
+                    roots.push(found);
                 }
             }
             next += 1;

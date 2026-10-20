@@ -1,10 +1,11 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use crate::flag_set::FlagSet;
 use crate::lanes::TestRunner;
 use crate::member::Member;
+use crate::passes::PassKey;
 use crate::platform::{self, SplitBy};
 use crate::project_command::{CommandStep, Joins, ProjectCommand, StepWhat};
 use crate::root::Root;
@@ -493,6 +494,33 @@ impl Step {
         steps
     }
 
+    /// Its slot is its root and its command, its own variables among it, not its name: `check`'s
+    /// lint and `gate`'s lint of the same flags share a pass. Its identity is what changes its
+    /// result from outside the working files: the tools' `versions`, and the variables of `env`
+    /// it does not set itself. The steps of one project command share its slot, which holds each
+    /// step's command and variables.
+    pub(crate) fn pass_key(
+        &self,
+        dir: &Path,
+        env: &BTreeMap<String, Option<String>>,
+        versions: &[String],
+    ) -> PassKey {
+        let (slot, own) = if let Some(shared) = &self.shared {
+            (serde_json::json!([dir, shared.command]), &[][..])
+        } else {
+            let slot = serde_json::json!([dir, self.argv, self.env]);
+            (slot, self.env.as_slice())
+        };
+        let env: Vec<_> = env
+            .iter()
+            .filter(|(name, _)| !own.iter().any(|(set, _)| set == *name))
+            .collect();
+        PassKey {
+            slot: slot.to_string(),
+            identity: serde_json::json!([env, versions]).to_string(),
+        }
+    }
+
     /// The program it runs, as an error names it.
     pub(crate) fn program_name(&self) -> String {
         match &self.program {
@@ -596,6 +624,52 @@ mod tests {
             .iter()
             .map(|arg| arg.to_string_lossy().into_owned());
         words.collect()
+    }
+
+    #[test]
+    fn a_pass_key_slots_the_command_and_identifies_the_tools_and_the_variables_it_leaves_alone() {
+        let root = Root::fixture();
+        let dir = Path::new("/w");
+        let lint = Step::lints(&root, &[FlagSet::all_features()]).remove(0);
+        let env = |pairs: &[(&str, &str)]| -> BTreeMap<String, Option<String>> {
+            (pairs.iter())
+                .map(|&(n, v)| (n.to_owned(), Some(v.to_owned())))
+                .collect()
+        };
+        let one = env(&[("RUSTFLAGS", "-Cx"), ("RUSTDOCFLAGS", "-Da")]);
+        let rustc = ["rustc 1".to_owned()];
+        let key = lint.pass_key(dir, &one, &rustc);
+        // Its name is in neither: `check`'s `lint` and `gate`'s `lint.1` share a pass.
+        let renamed = Step {
+            name: "lint.1".to_owned(),
+            ..lint.clone()
+        };
+        assert_eq!(renamed.pass_key(dir, &one, &rustc), key);
+        // Another toolchain or another variable it reads: the same slot, another identity.
+        let other = lint.pass_key(dir, &one, &["rustc 2".to_owned()]);
+        assert_eq!(other.slot, key.slot);
+        assert_ne!(other.identity, key.identity);
+        let flags = env(&[("RUSTFLAGS", "-Cy"), ("RUSTDOCFLAGS", "-Da")]);
+        assert_ne!(lint.pass_key(dir, &flags, &rustc).identity, key.identity);
+        // A variable it sets itself, as each step unsets RUSTDOCFLAGS, is its command's: the
+        // outside value changes nothing, and another value of its own is another slot.
+        let rustdoc = env(&[("RUSTFLAGS", "-Cx"), ("RUSTDOCFLAGS", "-Db")]);
+        assert_eq!(lint.pass_key(dir, &rustdoc, &rustc), key);
+        let mut blessed = lint.clone();
+        blessed.env.push(("BLESS".to_owned(), Some("1".to_owned())));
+        assert_ne!(blessed.pass_key(dir, &one, &rustc).slot, key.slot);
+        // The steps of one project command share its slot.
+        let shared = |at: &Step, last| Step {
+            shared: Some(SharedPass {
+                command: "lan: …".to_owned(),
+                last,
+            }),
+            ..at.clone()
+        };
+        assert_eq!(
+            shared(&lint, false).pass_key(dir, &one, &rustc),
+            shared(&blessed, true).pass_key(dir, &one, &rustc)
+        );
     }
 
     #[test]

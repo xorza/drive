@@ -13,17 +13,24 @@
 //! `$XDG_STATE_HOME/drive/` or `~/.local/state/drive/` on Linux, `~/Library/Logs/drive/` on
 //! macOS, `%LOCALAPPDATA%\drive\logs\` on Windows.
 //!
+//! A run ends on its verdict, one line for an agent that reads only the last: the result, the first
+//! cause of a failure, and `target/drive/last-<command>.txt`, which holds every line the run
+//! printed. Above it, each failed step shows the first lines it printed. Libtest's passes stay out
+//! of the step logs, as nextest's do.
+//!
 //! `cargo install --locked --git https://github.com/xorza/drive` puts `cargo-drive` on `PATH`,
 //! which cargo runs as `cargo drive`. It checks the workspace of the folder it runs in, and each
 //! root names the driver it needs in its table's `version`.
 
 #![expect(
-    clippy::print_stdout,
     clippy::print_stderr,
-    reason = "a command-line tool reports on its terminal"
+    reason = "a command-line tool warns on its terminal"
 )]
 
 mod cli;
+mod console;
+mod context;
+mod digest;
 mod error;
 mod flag_set;
 mod git;
@@ -44,35 +51,43 @@ mod runner;
 mod step;
 mod sweep;
 mod tool;
+mod tools;
 mod version;
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::ExitCode;
 
 use crate::cli::Task;
+use crate::context::Context;
+use crate::digest::Digest;
 use crate::error::{Error, Result};
 use crate::invocation::Invocation;
-use crate::journal::{End, Journal};
+use crate::journal::{End, Journal, Record};
 use crate::output::Ci;
 use crate::project::Project;
-use crate::root::Root;
 use crate::runner::{Finished, Runner};
 use crate::step::Format;
 
 fn main() -> ExitCode {
     let task = Task::parse();
-    let ci = if std::env::var_os("GITHUB_ACTIONS").is_some() {
+    // GitHub sets it to `true`; an empty or other value is no runner of its.
+    let ci = if std::env::var_os("GITHUB_ACTIONS").is_some_and(|v| v == "true") {
         Ci::GitHub
     } else {
         Ci::No
     };
     let mut journal = Journal::start(task.name(), &task.args(), ci);
-    let (top, result) = match top() {
-        Ok(top) => {
-            let result = run(&task, &top, ci, &mut journal);
-            (Some(top), result)
-        }
-        Err(error) => (None, Err(error)),
+    let (here, missing) = match std::env::current_dir() {
+        Ok(here) => (here, None),
+        Err(source) => (PathBuf::new(), Some(source)),
+    };
+    let mut cx = Context::new(ci, here);
+    let result = match missing {
+        None => run(&task, &mut journal, &mut cx),
+        Some(source) => Err(Error::Io {
+            path: PathBuf::from("."),
+            source,
+        }),
     };
     let end = match &result {
         Ok(Finished {
@@ -82,36 +97,66 @@ fn main() -> ExitCode {
         Ok(finished) if finished.passed() => End::Passed,
         Ok(_) => End::Failed,
     };
-    let outcomes = result.as_ref().map_or(&[][..], |f| f.outcomes.as_slice());
+    let finished = result.as_ref().ok();
+    let outcomes = finished.map_or(&[][..], |f| f.outcomes.as_slice());
+    let project = finished.map(|f| f.top.as_path());
     // The log serves later analysis: a failure to write it fails no check.
-    if let Some(dir) = platform::log_dir()
-        && let Err(error) = journal.write(&dir, top.as_deref(), outcomes, &end)
+    if let Some(dir) = platform::log_dir() {
+        let driver = cx.tools.driver().to_owned();
+        // Out of a project, the toolchain of the folder the driver ran in.
+        let rustc = cx.tools.rustc(project.unwrap_or(&cx.here)).to_owned();
+        let record = Record {
+            project,
+            outcomes,
+            end: &end,
+            driver: &driver,
+            rustc: &rustc,
+        };
+        if let Err(error) = journal.write(&dir, &record) {
+            eprintln!(
+                "warning: cannot write the run log in {}: {error}",
+                dir.display()
+            );
+        }
+    }
+    let error = match &end {
+        End::Error(error) => Some(error.as_str()),
+        End::Passed | End::Failed => None,
+    };
+    let console = &mut cx.console;
+    for (index, line) in error.unwrap_or_default().lines().enumerate() {
+        console.line(&if index == 0 {
+            format!("error: {line}")
+        } else {
+            line.to_owned()
+        });
+    }
+    let title = task.title();
+    let file = (finished.filter(|_| console.keeps())).map(|f| f.own.join(task.output_file()));
+    let digest = Digest {
+        command: &title,
+        outcomes,
+        error,
+        file: file.as_deref(),
+        base: &cx.here,
+    };
+    for line in digest.lines() {
+        console.line(&line);
+    }
+    if let Some(file) = &file
+        && let Err(error) = console.save(file)
     {
-        eprintln!(
-            "warning: cannot write the run log in {}: {error}",
-            dir.display()
-        );
+        eprintln!("warning: cannot write {}: {error}", file.display());
     }
     match end {
         End::Passed => ExitCode::SUCCESS,
         End::Failed => ExitCode::FAILURE,
-        End::Error(error) => {
-            eprintln!("error: {error}");
-            ExitCode::from(2)
-        }
+        End::Error(_) => ExitCode::from(2),
     }
 }
 
-/// The workspace of the folder the driver runs in.
-fn top() -> Result<PathBuf> {
-    let here = std::env::current_dir().map_err(|source| Error::Io {
-        path: PathBuf::from("."),
-        source,
-    })?;
-    Root::workspace_of(&here)
-}
-
-fn run(task: &Task, top: &Path, ci: Ci, journal: &mut Journal) -> Result<Finished> {
+/// The task on the workspace that holds the folder the driver runs in.
+fn run(task: &Task, journal: &mut Journal, cx: &mut Context) -> Result<Finished> {
     for name in ["RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS"] {
         if std::env::var_os(name).is_some() {
             eprintln!(
@@ -122,14 +167,14 @@ fn run(task: &Task, top: &Path, ci: Ci, journal: &mut Journal) -> Result<Finishe
     }
     if let Task::Sweep(sweep) = task
         && sweep.format() == Format::Write
-        && ci == Ci::GitHub
+        && cx.console.ci() == Ci::GitHub
     {
         return Err(Error::LocalInCi {
             command: sweep.name(),
         });
     }
-    let project = Project::load(top)?;
+    let project = Project::load(&cx.here)?;
     journal.loaded();
     let invocation = Invocation::new(task, &project)?;
-    Ok(Runner::new(&project, ci, invocation.reuse)?.run(&invocation.plans, invocation.on_fail))
+    Ok(Runner::new(&project, invocation.reuse, cx)?.run(&invocation.plans, invocation.on_fail))
 }

@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::step::Step;
@@ -27,8 +27,10 @@ pub(crate) struct Outcome {
     pub(crate) status: Status,
     pub(crate) elapsed: Duration,
     pub(crate) log: Option<PathBuf>,
-    /// The lines it printed above its own.
-    pub(crate) printed: usize,
+    /// The first lines of its own it printed: diagnostics, failures and results.
+    pub(crate) first: Vec<String>,
+    /// How many such lines it had in all.
+    pub(crate) lines: usize,
     /// The time the driver spent around the step: git's trees, the step's identity, its pass.
     pub(crate) overhead: Duration,
     /// The crates cargo compiled rather than found fresh, once for each unit.
@@ -81,7 +83,8 @@ impl Outcome {
             status,
             elapsed: Duration::ZERO,
             log: None,
-            printed: 0,
+            first: Vec::new(),
+            lines: 0,
             overhead: Duration::ZERO,
             compiled: Vec::new(),
             errors: 0,
@@ -92,8 +95,9 @@ impl Outcome {
         }
     }
 
-    /// `name  status  seconds  [log]  note`, with the log only for a failure.
-    pub(crate) fn line(&self, name_width: usize) -> String {
+    /// `name  status  seconds  [log]  note`, with the log only for a failure, relative to `base`
+    /// when it lies under it.
+    pub(crate) fn line(&self, name_width: usize, base: &Path) -> String {
         let mut line = format!(
             "{:<name_width$}  {:<4}  {:>6.1} s",
             self.name,
@@ -104,7 +108,7 @@ impl Outcome {
             && let Some(log) = &self.log
         {
             line += "  ";
-            line += &log.display().to_string();
+            line += &log.strip_prefix(base).unwrap_or(log).display().to_string();
         }
         if !self.note.is_empty() {
             line += "  ";
@@ -122,17 +126,22 @@ mod tests {
     fn line_names_the_log_of_a_failure_only() {
         let mut outcome = Outcome::reused("lint", "no input changed since it passed".to_owned());
         assert!(outcome.reused);
+        let base = Path::new("/w");
         assert_eq!(
-            outcome.line(6),
+            outcome.line(6, base),
             "lint    ok       0.0 s  no input changed since it passed"
         );
         outcome.status = Status::Fail;
         outcome.elapsed = Duration::from_millis(12_345);
-        outcome.log = Some(PathBuf::from("target/drive/log/lint.log"));
+        outcome.log = Some(PathBuf::from("/w/target/drive/log/lint.log"));
         outcome.note = "2 errors".to_owned();
         assert_eq!(
-            outcome.line(4),
+            outcome.line(4, base),
             "lint  FAIL    12.3 s  target/drive/log/lint.log  2 errors"
+        );
+        assert_eq!(
+            outcome.line(4, Path::new("/elsewhere")),
+            "lint  FAIL    12.3 s  /w/target/drive/log/lint.log  2 errors"
         );
         let skipped = Outcome::skipped("tests", String::new());
         assert!(!skipped.reused);

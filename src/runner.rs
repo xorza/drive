@@ -1,18 +1,19 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::fs::File;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
+use crate::context::Context;
 use crate::error::{Error, Result};
 use crate::git::Repo;
+use crate::lanes::TestRunner;
 use crate::outcome::{Outcome, Status};
-use crate::output::{self, Ci};
-use crate::passes::{Passes, Snapshot};
+use crate::output::{self, Capture, Ci};
+use crate::passes::{PassKey, Passes, Snapshot};
 use crate::project::Project;
 use crate::root::{Reach, Root};
 use crate::step::{Kind, Program, Runs, Step};
 use crate::tool;
-use crate::version;
 
 /// Whether a command reuses and keeps the passes of its steps.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -80,6 +81,10 @@ pub(crate) struct Finished {
     pub(crate) outcomes: Vec<Outcome>,
     /// A driver error that ended the command before its last step; the steps before it stay.
     pub(crate) error: Option<Error>,
+    /// The top root's folder.
+    pub(crate) top: PathBuf,
+    /// `<top target>/drive`, which holds the logs and the run's output file.
+    pub(crate) own: PathBuf,
 }
 
 impl Finished {
@@ -100,38 +105,36 @@ pub(crate) struct Plan<'p> {
 #[derive(Debug)]
 pub(crate) struct Runner<'p> {
     project: &'p Project,
-    ci: Ci,
+    cx: &'p mut Context,
     /// `<top target>/drive`: logs, passes and scratch.
     own: PathBuf,
     passes: Option<Passes>,
-    shown: BTreeSet<String>,
     outcomes: Vec<Outcome>,
-    driver: Option<String>,
-    rustc: Option<String>,
-    nextest: Option<String>,
     /// Each repository's tree, as it stands since the last step that ran: a step that runs can
     /// write files, as `fmt` does.
     trees: BTreeMap<PathBuf, String>,
 }
 
 impl<'p> Runner<'p> {
-    pub(crate) fn new(project: &'p Project, ci: Ci, reuse: Reuse) -> Result<Self> {
+    pub(crate) fn new(project: &'p Project, reuse: Reuse, cx: &'p mut Context) -> Result<Self> {
         let own = project.top().target_dir.join("drive");
         let logs = own.join("log");
-        std::fs::create_dir_all(&logs).map_err(|source| Error::Io { path: logs, source })?;
+        std::fs::create_dir_all(&logs).map_err(|source| Error::Io {
+            path: logs.clone(),
+            source,
+        })?;
+        for dir in [&own, &logs] {
+            sweep_aside(dir, SystemTime::now());
+        }
         // CI's checkout is new, so it keeps no passes.
-        let passes =
-            (reuse == Reuse::Passes && ci == Ci::No).then(|| Passes::load(own.join("passes.json")));
+        let passes = (reuse == Reuse::Passes && cx.console.ci() == Ci::No)
+            .then(|| Passes::load(own.join("passes.json"), cx.tools.driver()));
         Ok(Self {
             project,
-            ci,
+            cx,
             own,
             passes,
-            shown: BTreeSet::new(),
             outcomes: Vec::new(),
-            driver: None,
-            rustc: None,
-            nextest: None,
             trees: BTreeMap::new(),
         })
     }
@@ -164,21 +167,16 @@ impl<'p> Runner<'p> {
                     }
                 };
                 stops.record(&outcome);
-                println!("{}", outcome.line(width));
+                let line = outcome.line(width, &self.cx.here);
+                self.cx.console.line(&line);
                 self.outcomes.push(outcome);
-            }
-        }
-        // Diagnostics between the lines leave them apart: the lines again, under a heading, so no
-        // one reads them as a second run.
-        if self.outcomes.len() > 1 && self.outcomes.iter().any(|o| o.printed > 0) {
-            println!("\nsummary");
-            for outcome in &self.outcomes {
-                println!("{}", outcome.line(width));
             }
         }
         Finished {
             outcomes: self.outcomes,
             error,
+            top: self.project.top().dir.clone(),
+            own: self.own,
         }
     }
 
@@ -225,7 +223,7 @@ impl<'p> Runner<'p> {
     fn reuse(
         &mut self,
         step: &Step,
-        key: String,
+        key: PassKey,
         snapshot: Snapshot,
         note: &str,
     ) -> Result<Outcome> {
@@ -260,30 +258,35 @@ impl<'p> Runner<'p> {
                 None => command.env_remove(name),
             };
         }
-        if self.ci == Ci::GitHub {
-            println!("::group::{}", step.name);
+        let ci = self.cx.console.ci();
+        if ci == Ci::GitHub {
+            self.cx.console.line(&format!("::group::{}", step.name));
         }
         self.trees.clear();
         let started = Instant::now();
-        let log_name = log.display().to_string();
-        let report = output::run(
-            &mut command,
-            step.kind,
-            self.ci,
-            file,
-            &log_name,
-            &mut self.shown,
-        )
-        .map_err(|source| Error::Spawn {
-            program: step.program_name(),
-            source,
-        })?;
+        let log_name = log
+            .strip_prefix(&self.cx.here)
+            .unwrap_or(&log)
+            .display()
+            .to_string();
+        let capture = Capture {
+            kind: step.kind,
+            log: file,
+            log_name: &log_name,
+        };
+        let report =
+            output::run(&mut command, capture, &mut self.cx.console).map_err(|source| {
+                Error::Spawn {
+                    program: step.program_name(),
+                    source,
+                }
+            })?;
         let elapsed = started.elapsed();
         std::fs::rename(&aside, &log).map_err(io(log.clone()))?;
-        if self.ci == Ci::GitHub {
-            println!("::endgroup::");
+        if ci == Ci::GitHub {
+            self.cx.console.line("::endgroup::");
         }
-        let status = if report.code == Some(0) && report.errors == 0 {
+        let status = if report.passed() {
             Status::Ok
         } else {
             Status::Fail
@@ -291,31 +294,19 @@ impl<'p> Runner<'p> {
         // A lint that fails with no diagnostic failed before rustc ran: no build gets further.
         let broken = report.hard > 0
             || (status == Status::Fail && step.kind == Kind::Check && report.errors == 0);
-        let mut notes: Vec<String> = [step.label.as_str(), report.summary.as_str()]
-            .into_iter()
-            .filter(|n| !n.is_empty())
-            .map(str::to_owned)
-            .collect();
-        if report.errors > 0 {
-            let plural = if report.errors == 1 { "" } else { "s" };
-            let repeated = if report.repeated > 0 {
-                format!(", {} shown above", report.repeated)
-            } else {
-                String::new()
-            };
-            notes.push(format!("{} error{plural}{repeated}", report.errors));
-        }
+        let note = report.note(&step.label);
         Ok(Outcome {
             name: step.name.clone(),
             status,
             elapsed,
             log: Some(log),
-            printed: report.printed,
+            first: report.first,
+            lines: report.lines,
             overhead: Duration::ZERO,
             errors: report.errors,
             summary: report.summary,
             compiled: report.compiled,
-            note: notes.join("; "),
+            note,
             broken,
             reused: false,
         })
@@ -323,7 +314,9 @@ impl<'p> Runner<'p> {
 
     /// The trees of the repositories `root`'s steps read; `None` outside git.
     fn snapshot(&mut self, root: &Root) -> Result<Option<Snapshot>> {
-        let scratch = self.own.join(format!("tree-index-{}", std::process::id()));
+        let scratch = self
+            .own
+            .join(format!("tree-index-{}.tmp", std::process::id()));
         let mut snapshot = Snapshot::new();
         for each in std::iter::once(root).chain(self.project.outside(root)) {
             let Some(repo) = &each.repo else {
@@ -362,45 +355,40 @@ impl<'p> Runner<'p> {
         Some(paths)
     }
 
-    /// A step's identity: what changes its result from outside the working files. Its command,
-    /// not its name: `check`'s lint and `gate`'s lint of the same flags share a pass.
-    fn key(&mut self, root: &Root, step: &Step) -> String {
-        let rustc = self
-            .rustc
-            .get_or_insert_with(|| {
-                tool::first_line(tool::command("rustc").arg("-V").current_dir(&root.dir))
-            })
-            .clone();
-        let driver = self.driver.get_or_insert_with(version::identity).clone();
-        let mut tools = vec![driver, rustc];
-        if step.kind == Kind::Nextest {
-            let nextest = self.nextest.get_or_insert_with(|| {
-                tool::first_line(
-                    tool::cargo()
-                        .args(["nextest", "--version"])
-                        .current_dir(&root.dir),
-                )
-            });
-            tools.push(nextest.clone());
+    /// The versions of the tools `step` runs, read once a run; the passes file names the driver.
+    fn key(&mut self, root: &Root, step: &Step) -> PassKey {
+        let tools = &mut self.cx.tools;
+        let mut versions = vec![tools.rustc(&root.dir).to_owned()];
+        // The steps of a shared pass need one identity, and any of them may run the tests.
+        let tests = match step.shared {
+            Some(_) => root.lanes.test_runner == TestRunner::Nextest,
+            None => step.kind == Kind::Nextest,
+        };
+        if tests {
+            versions.push(tools.nextest(&root.dir).to_owned());
         }
-        // `vars` panics on any variable that is not UTF-8, also one no key reads. Each value keeps
-        // its bytes escaped, so no two values, UTF-8 or not, read alike.
-        let mut env: BTreeMap<String, Option<String>> = std::env::vars_os()
-            .filter(|(name, _)| !tool::is_drivers_own(name))
-            .filter_map(|(name, value)| {
-                let name = name.into_string().ok()?;
-                let value = value.as_encoded_bytes().escape_ascii().to_string();
-                (name.starts_with("RUST") || name.starts_with("CARGO"))
-                    .then_some((name, Some(value)))
-            })
-            .collect();
-        // The steps of one command share its identity, which holds each step's own variables.
-        if let Some(shared) = &step.shared {
-            return serde_json::json!([root.dir, shared.command, env, tools[..2]]).to_string();
+        step.pass_key(&root.dir, tools.env(), &versions)
+    }
+}
+
+/// How old a file written aside, `*.tmp`, is before a run takes it for one an interrupted run
+/// left: a run writes its own as it goes, and none runs a day.
+const ASIDE_AGE: Duration = Duration::from_hours(24);
+
+/// Removes the files written aside in `dir` that runs left as they were interrupted, as `now`
+/// tells their age. Their names hold the process's id, so no later run writes over one. A failure
+/// to remove one fails no check.
+fn sweep_aside(dir: &Path, now: SystemTime) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let aside = entry.file_name().to_string_lossy().ends_with(".tmp");
+        let old = (entry.metadata().and_then(|m| m.modified()))
+            .is_ok_and(|at| now.duration_since(at).is_ok_and(|age| age > ASIDE_AGE));
+        if aside && old && entry.file_type().is_ok_and(|t| !t.is_dir()) {
+            std::fs::remove_file(entry.path()).ok();
         }
-        env.extend(step.env.iter().cloned());
-        let identity = serde_json::json!([root.dir, step.argv, env, tools]);
-        identity.to_string()
     }
 }
 
@@ -434,6 +422,37 @@ mod tests {
             broken,
             ..Outcome::skipped(name, String::new())
         }
+    }
+
+    #[test]
+    fn sweeps_only_old_files_written_aside() {
+        let dir = std::env::temp_dir().join(format!("drive-sweep-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("folder.tmp")).unwrap();
+        let names = [
+            "lint.log-1.tmp",
+            "tree-index-2.tmp",
+            "fresh-3.tmp",
+            "lint.log",
+        ];
+        for name in names {
+            std::fs::write(dir.join(name), "x").unwrap();
+        }
+        let now = SystemTime::now();
+        let old = now - ASIDE_AGE - Duration::from_secs(1);
+        for name in ["lint.log-1.tmp", "tree-index-2.tmp", "lint.log"] {
+            let file = File::options().write(true).open(dir.join(name)).unwrap();
+            file.set_modified(old).unwrap();
+        }
+        sweep_aside(&dir, now);
+        let mut left: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        left.sort();
+        std::fs::remove_dir_all(&dir).unwrap();
+        // A file newer than a day may be a running run's, a log is no aside file, and a folder
+        // is none the driver writes.
+        assert_eq!(left, ["folder.tmp", "fresh-3.tmp", "lint.log"]);
     }
 
     #[test]

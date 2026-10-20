@@ -1,50 +1,84 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+use serde::{Deserialize, Serialize};
+
 use crate::error::{Error, Result};
 
 /// A tree for each repository a step reads: its root's, and those of the roots it builds
 /// through path dependencies.
 pub(crate) type Snapshot = BTreeMap<PathBuf, String>;
 
-/// The snapshot each step last passed on, by the step's identity: its root, name, command,
-/// environment and tool versions.
+/// Which pass a step reads and keeps: its slot, its root and command, holds one pass, the last;
+/// its identity, the tools and variables it ran under, must match for the pass to count. A new
+/// toolchain or driver replaces the slot's pass, so the file holds one pass a command.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PassKey {
+    pub(crate) slot: String,
+    pub(crate) identity: String,
+}
+
+/// The snapshot each step last passed on, by its slot, as one driver kept them: another driver
+/// reads none, and its first pass starts the file again, so no pass outlives its driver.
 #[derive(Debug)]
 pub(crate) struct Passes {
     path: PathBuf,
-    kept: BTreeMap<String, Snapshot>,
+    file: File,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct File {
+    driver: String,
+    kept: BTreeMap<String, Kept>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct Kept {
+    identity: String,
+    snapshot: Snapshot,
 }
 
 impl Passes {
-    pub(crate) fn load(path: PathBuf) -> Self {
-        let kept = Self::read(&path);
-        Self { path, kept }
+    /// The passes `driver`, the running driver's identity, kept at `path`.
+    pub(crate) fn load(path: PathBuf, driver: &str) -> Self {
+        let file = Self::read(&path, driver);
+        Self { path, file }
     }
 
-    fn read(path: &PathBuf) -> BTreeMap<String, Snapshot> {
-        std::fs::read_to_string(path)
+    /// An unreadable file, or one another driver wrote, keeps no pass.
+    fn read(path: &PathBuf, driver: &str) -> File {
+        std::fs::read(path)
             .ok()
-            .and_then(|text| serde_json::from_str(&text).ok())
-            .unwrap_or_default()
+            .and_then(|bytes| serde_json::from_slice::<File>(&bytes).ok())
+            .filter(|file| file.driver == driver)
+            .unwrap_or_else(|| File {
+                driver: driver.to_owned(),
+                kept: BTreeMap::new(),
+            })
     }
 
-    pub(crate) fn get(&self, key: &str) -> Option<&Snapshot> {
-        self.kept.get(key)
+    pub(crate) fn get(&self, key: &PassKey) -> Option<&Snapshot> {
+        let kept = self.file.kept.get(&key.slot)?;
+        (kept.identity == key.identity).then_some(&kept.snapshot)
     }
 
     /// Another run may have kept passes since this one loaded: they stay.
-    pub(crate) fn keep(&mut self, key: String, snapshot: Snapshot) -> Result<()> {
-        self.kept = Self::read(&self.path);
-        self.kept.insert(key, snapshot);
+    pub(crate) fn keep(&mut self, key: PassKey, snapshot: Snapshot) -> Result<()> {
+        self.file = Self::read(&self.path, &self.file.driver);
+        let kept = Kept {
+            identity: key.identity,
+            snapshot,
+        };
+        self.file.kept.insert(key.slot, kept);
         let aside = self
             .path
             .with_file_name(format!("passes-{}.tmp", std::process::id()));
-        let text = serde_json::to_string_pretty(&self.kept).expect("a map of strings serializes");
+        let bytes = serde_json::to_vec(&self.file).expect("a map of strings serializes");
         let io = |source| Error::Io {
             path: self.path.clone(),
             source,
         };
-        std::fs::write(&aside, text).map_err(io)?;
+        std::fs::write(&aside, bytes).map_err(io)?;
         std::fs::rename(&aside, &self.path).map_err(io)
     }
 }
@@ -53,21 +87,46 @@ impl Passes {
 mod tests {
     use super::*;
 
+    fn key(slot: &str, identity: &str) -> PassKey {
+        PassKey {
+            slot: slot.to_owned(),
+            identity: identity.to_owned(),
+        }
+    }
+
     #[test]
-    fn keep_merges_with_what_another_run_kept() {
+    fn keep_merges_with_what_another_run_kept_and_replaces_its_slot() {
         let dir = std::env::temp_dir().join(format!("drive-passes-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("passes.json");
         let snapshot = |tree: &str| Snapshot::from([(PathBuf::from("/w"), tree.to_owned())]);
 
-        let mut first = Passes::load(path.clone());
-        let mut second = Passes::load(path.clone());
-        assert!(first.get("lint").is_none());
-        first.keep("lint".to_owned(), snapshot("a")).unwrap();
-        second.keep("tests".to_owned(), snapshot("b")).unwrap();
-        let read = Passes::load(path);
+        let load = |driver| Passes::load(path.clone(), driver);
+        let mut first = load("0.2.1 a");
+        let mut second = load("0.2.1 a");
+        assert!(first.get(&key("lint", "rustc 1")).is_none());
+        first.keep(key("lint", "rustc 1"), snapshot("a")).unwrap();
+        second.keep(key("tests", "rustc 1"), snapshot("b")).unwrap();
+        let read = load("0.2.1 a");
+        assert_eq!(read.get(&key("lint", "rustc 1")), Some(&snapshot("a")));
+        assert_eq!(read.get(&key("tests", "rustc 1")), Some(&snapshot("b")));
+        // Another identity counts no pass, and its own pass takes the slot.
+        assert_eq!(read.get(&key("lint", "rustc 2")), None);
+        second.keep(key("lint", "rustc 2"), snapshot("c")).unwrap();
+        let read = load("0.2.1 a");
+        assert_eq!(read.get(&key("lint", "rustc 2")), Some(&snapshot("c")));
+        assert_eq!(read.get(&key("lint", "rustc 1")), None);
+        assert_eq!(read.file.kept.len(), 2);
+        // Another driver reads no pass, and its first pass drops the old driver's.
+        let mut rebuilt = load("0.2.1 b");
+        assert!(rebuilt.get(&key("tests", "rustc 1")).is_none());
+        rebuilt.keep(key("doc", "rustc 1"), snapshot("d")).unwrap();
+        let read = load("0.2.1 b");
+        assert_eq!(read.file.kept.keys().collect::<Vec<_>>(), ["doc"]);
+        assert!(load("0.2.1 a").file.kept.is_empty());
+        // A file of another shape keeps nothing.
+        std::fs::write(&path, r#"{"lint":{"/w":"a"}}"#).unwrap();
+        assert!(load("0.2.1 b").file.kept.is_empty());
         std::fs::remove_dir_all(&dir).unwrap();
-        assert_eq!(read.get("lint"), Some(&snapshot("a")));
-        assert_eq!(read.get("tests"), Some(&snapshot("b")));
     }
 }

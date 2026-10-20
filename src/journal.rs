@@ -5,11 +5,13 @@ use std::time::{Duration, Instant, SystemTime};
 
 use crate::outcome::Outcome;
 use crate::output::Ci;
-use crate::tool;
-use crate::version;
+
+/// The months of run log kept: the current one and the two before it.
+const MONTHS_KEPT: i64 = 3;
 
 /// The run log: one JSON line for each command, with its steps, so the time of the builds, the
-/// tests and the driver itself is measured, not assumed. One file a month, `2026-10.jsonl`.
+/// tests and the driver itself is measured, not assumed. One file a month, `2026-10.jsonl`, of
+/// which the last [`MONTHS_KEPT`] stay.
 #[derive(Debug)]
 pub(crate) struct Journal {
     started: Instant,
@@ -19,6 +21,17 @@ pub(crate) struct Journal {
     ci: Ci,
     /// The time to load the project: `cargo metadata` for each root.
     load: Duration,
+}
+
+/// What a command came to, for its line.
+#[derive(Debug)]
+pub(crate) struct Record<'r> {
+    /// The top root's folder; `None` for a run that found none.
+    pub(crate) project: Option<&'r Path>,
+    pub(crate) outcomes: &'r [Outcome],
+    pub(crate) end: &'r End,
+    pub(crate) driver: &'r str,
+    pub(crate) rustc: &'r str,
 }
 
 /// How a command ended.
@@ -56,13 +69,14 @@ impl Journal {
     }
 
     /// The command's line, appended to this month's file in `dir`.
-    pub(crate) fn write(
-        &self,
-        dir: &Path,
-        project: Option<&Path>,
-        outcomes: &[Outcome],
-        end: &End,
-    ) -> std::io::Result<PathBuf> {
+    pub(crate) fn write(&self, dir: &Path, record: &Record<'_>) -> std::io::Result<PathBuf> {
+        let Record {
+            project,
+            outcomes,
+            end,
+            driver,
+            rustc,
+        } = record;
         let elapsed = self.started.elapsed();
         let since_epoch = self
             .at
@@ -75,12 +89,6 @@ impl Journal {
             End::Error(message) => (2, Some(message.as_str())),
         };
         let steps: Vec<serde_json::Value> = outcomes.iter().map(step).collect();
-        let mut rustc = tool::command("rustc");
-        rustc.arg("-V");
-        // Out of a project, the toolchain of the folder the driver ran in.
-        if let Some(project) = project {
-            rustc.current_dir(project);
-        }
         let line = serde_json::json!({
             "at": utc.rfc3339(),
             "unix_ms": since_epoch.as_millis(),
@@ -91,8 +99,8 @@ impl Journal {
             "error": error,
             "seconds": seconds(elapsed),
             "load_seconds": seconds(self.load),
-            "driver": version::identity(),
-            "rustc": tool::first_line(&mut rustc),
+            "driver": driver,
+            "rustc": rustc,
             "os": std::env::consts::OS,
             "arch": std::env::consts::ARCH,
             "cpus": std::thread::available_parallelism().map_or(0, usize::from),
@@ -101,11 +109,43 @@ impl Journal {
         });
         std::fs::create_dir_all(dir)?;
         let path = dir.join(format!("{:04}-{:02}.jsonl", utc.year, utc.month));
+        let new_month = !path.exists();
         let mut file = OpenOptions::new().create(true).append(true).open(&path)?;
         // One write of the whole line: runs beside this one append to the same file.
         file.write_all(format!("{line}\n").as_bytes())?;
+        if new_month {
+            prune(dir, utc.months());
+        }
         Ok(path)
     }
+}
+
+/// Removes the month files of `dir` older than the months kept up to `now`, in months since year
+/// 0; a failure to remove one fails no write.
+fn prune(dir: &Path, now: i64) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let month = entry.file_name().to_str().and_then(month_of);
+        if month.is_some_and(|month| month <= now - MONTHS_KEPT) {
+            std::fs::remove_file(entry.path()).ok();
+        }
+    }
+}
+
+/// `2026-10.jsonl` in months since year 0; `None` for any other name.
+fn month_of(name: &str) -> Option<i64> {
+    let (year, month) = name.strip_suffix(".jsonl")?.split_once('-')?;
+    let digits = |s: &str, n| s.len() == n && s.bytes().all(|b| b.is_ascii_digit());
+    if !digits(year, 4) || !digits(month, 2) {
+        return None;
+    }
+    let month: i64 = month.parse().ok()?;
+    (1..=12)
+        .contains(&month)
+        .then(|| year.parse::<i64>().ok().map(|year| year * 12 + month - 1))
+        .flatten()
 }
 
 fn step(outcome: &Outcome) -> serde_json::Value {
@@ -148,6 +188,11 @@ impl Utc {
         }
     }
 
+    /// Its month in months since year 0.
+    fn months(&self) -> i64 {
+        self.year * 12 + i64::from(self.month) - 1
+    }
+
     fn rfc3339(&self) -> String {
         let (h, m, s) = (
             self.seconds / 3_600,
@@ -186,6 +231,55 @@ mod tests {
     }
 
     #[test]
+    fn a_new_month_drops_the_months_past_the_ones_kept() {
+        let dir = std::env::temp_dir().join(format!("drive-prune-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let old = ["2025-12", "2026-06", "2026-07", "2026-08", "2026-09"];
+        for name in old.map(|m| format!("{m}.jsonl")).iter().chain(&[
+            "notes.txt".to_owned(),
+            "2026-13.jsonl".to_owned(),
+            "26-07.jsonl".to_owned(),
+        ]) {
+            std::fs::write(dir.join(name), "{}\n").unwrap();
+        }
+        let mut journal = Journal::start("check", &[], Ci::No);
+        // 2026-10-20T12:00:00Z, 1_792_497_600 s: the first line of October drops July and every
+        // month before.
+        journal.at = SystemTime::UNIX_EPOCH + Duration::from_hours(497_916);
+        let record = Record {
+            project: None,
+            outcomes: &[],
+            end: &End::Passed,
+            driver: "d",
+            rustc: "r",
+        };
+        journal.write(&dir, &record).unwrap();
+        // A later line of the month removes nothing: a file of July written back stays.
+        std::fs::write(dir.join("2026-07.jsonl"), "{}\n").unwrap();
+        journal.write(&dir, &record).unwrap();
+        let mut left: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        left.sort();
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(
+            left,
+            [
+                "2026-07.jsonl",
+                "2026-08.jsonl",
+                "2026-09.jsonl",
+                "2026-10.jsonl",
+                "2026-13.jsonl",
+                "26-07.jsonl",
+                "notes.txt"
+            ]
+        );
+        assert_eq!(month_of("2026-01.jsonl"), Some(2026 * 12));
+        assert_eq!(month_of("2026-1.jsonl"), None);
+    }
+
+    #[test]
     fn writes_one_line_a_command() {
         let dir = std::env::temp_dir().join(format!("drive-journal-{}", std::process::id()));
         let mut journal = Journal::start("test", &["name".to_owned()], Ci::No);
@@ -198,11 +292,19 @@ mod tests {
         tests.compiled = vec!["core".to_owned()];
         tests.errors = 2;
         let outcomes = [lint, tests];
-        let path = journal
-            .write(&dir, Some(Path::new("/w")), &outcomes, &End::Failed)
-            .unwrap();
+        let record = |project, outcomes, end| Record {
+            project,
+            outcomes,
+            end,
+            driver: "0.2.1 abc",
+            rustc: "rustc 1.99.1",
+        };
+        let failed = record(Some(Path::new("/w")), &outcomes, &End::Failed);
+        let path = journal.write(&dir, &failed).unwrap();
         let error = End::Error("cannot write /w/target/drive/log/tests.log".to_owned());
-        journal.write(&dir, None, &outcomes[..1], &error).unwrap();
+        journal
+            .write(&dir, &record(None, &outcomes[..1], &error))
+            .unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
 
@@ -226,7 +328,10 @@ mod tests {
         assert_eq!(ran["steps"][1]["seconds"], 1.234);
         assert_eq!(ran["steps"][1]["compiled"], serde_json::json!(["core"]));
         assert_eq!(ran["steps"][1]["errors"], 2);
-        assert_eq!(ran["driver"], version::identity());
+        assert_eq!(
+            (ran["driver"].as_str(), ran["rustc"].as_str()),
+            (Some("0.2.1 abc"), Some("rustc 1.99.1"))
+        );
         assert_eq!(lines[1]["exit"], 2);
         // An error before the project is found leaves it out.
         assert!(lines[1]["project"].is_null());

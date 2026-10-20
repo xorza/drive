@@ -45,7 +45,8 @@ pub(crate) enum Reach {
 }
 
 impl Root {
-    pub(crate) fn load(dir: &Path, label: String) -> Result<Self> {
+    /// The workspace that holds `dir`, its label empty.
+    pub(crate) fn load(dir: &Path) -> Result<Self> {
         let mut cargo = tool::cargo();
         cargo.args(["metadata", "--format-version", "1", "--no-deps"]);
         let json = tool::stdout(&mut cargo, dir)?;
@@ -53,7 +54,7 @@ impl Root {
             dir: dir.to_owned(),
             source,
         })?;
-        Self::from_metadata(meta, label)
+        Self::from_metadata(meta, String::new())
     }
 
     fn from_metadata(meta: Metadata, label: String) -> Result<Self> {
@@ -219,18 +220,6 @@ impl Root {
         // Git's own files: a change to what git tracks shows as the files it adds or drops.
         let git = file.starts_with(".git");
         !hidden && !git && file != "AGENTS.md" && file != "CLAUDE.md"
-    }
-
-    /// The folder of the workspace that holds the package in `dir`.
-    pub(crate) fn workspace_of(dir: &Path) -> Result<PathBuf> {
-        let mut cargo = tool::cargo();
-        cargo.args(["locate-project", "--workspace", "--message-format", "plain"]);
-        let manifest = tool::stdout(&mut cargo, dir)?;
-        let manifest = Path::new(manifest.trim());
-        Ok(manifest
-            .parent()
-            .expect("a manifest path names a file")
-            .to_owned())
     }
 
     /// Whether a member's folder holds `dir`.
