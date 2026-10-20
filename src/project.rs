@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use crate::error::Result;
 use crate::root::Root;
 
-/// The root the driver sits in, then the workspace of each path dependency outside it, and so
+/// The workspace the driver runs in, then the workspace of each path dependency outside it, and so
 /// on: each is a root of its own, checked in its own folder, and a change there reaches the
 /// builds of the roots that depend on it.
 #[derive(Debug)]

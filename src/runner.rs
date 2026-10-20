@@ -12,6 +12,7 @@ use crate::project::Project;
 use crate::root::{Reach, Root};
 use crate::step::{Kind, Program, Runs, Step};
 use crate::tool;
+use crate::version;
 
 /// Whether a command reuses and keeps the passes of its steps.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -105,6 +106,7 @@ pub(crate) struct Runner<'p> {
     passes: Option<Passes>,
     shown: BTreeSet<String>,
     outcomes: Vec<Outcome>,
+    driver: Option<String>,
     rustc: Option<String>,
     nextest: Option<String>,
     /// Each repository's tree, as it stands since the last step that ran: a step that runs can
@@ -127,6 +129,7 @@ impl<'p> Runner<'p> {
             passes,
             shown: BTreeSet::new(),
             outcomes: Vec::new(),
+            driver: None,
             rustc: None,
             nextest: None,
             trees: BTreeMap::new(),
@@ -368,7 +371,8 @@ impl<'p> Runner<'p> {
                 tool::first_line(tool::command("rustc").arg("-V").current_dir(&root.dir))
             })
             .clone();
-        let mut tools = vec![rustc];
+        let driver = self.driver.get_or_insert_with(version::identity).clone();
+        let mut tools = vec![driver, rustc];
         if step.kind == Kind::Nextest {
             let nextest = self.nextest.get_or_insert_with(|| {
                 tool::first_line(
@@ -392,7 +396,7 @@ impl<'p> Runner<'p> {
             .collect();
         // The steps of one command share its identity, which holds each step's own variables.
         if let Some(shared) = &step.shared {
-            return serde_json::json!([root.dir, shared.command, env, tools[0]]).to_string();
+            return serde_json::json!([root.dir, shared.command, env, tools[..2]]).to_string();
         }
         env.extend(step.env.iter().cloned());
         let identity = serde_json::json!([root.dir, step.argv, env, tools]);

@@ -6,6 +6,7 @@ use std::time::{Duration, Instant, SystemTime};
 use crate::outcome::Outcome;
 use crate::output::Ci;
 use crate::tool;
+use crate::version;
 
 /// The run log: one JSON line for each command, with its steps, so the time of the builds, the
 /// tests and the driver itself is measured, not assumed. One file a month, `2026-10.jsonl`.
@@ -58,7 +59,7 @@ impl Journal {
     pub(crate) fn write(
         &self,
         dir: &Path,
-        project: &Path,
+        project: Option<&Path>,
         outcomes: &[Outcome],
         end: &End,
     ) -> std::io::Result<PathBuf> {
@@ -74,6 +75,12 @@ impl Journal {
             End::Error(message) => (2, Some(message.as_str())),
         };
         let steps: Vec<serde_json::Value> = outcomes.iter().map(step).collect();
+        let mut rustc = tool::command("rustc");
+        rustc.arg("-V");
+        // Out of a project, the toolchain of the folder the driver ran in.
+        if let Some(project) = project {
+            rustc.current_dir(project);
+        }
         let line = serde_json::json!({
             "at": utc.rfc3339(),
             "unix_ms": since_epoch.as_millis(),
@@ -84,8 +91,8 @@ impl Journal {
             "error": error,
             "seconds": seconds(elapsed),
             "load_seconds": seconds(self.load),
-            "driver": tool::first_line(tool::command("git").args(["describe", "--always", "--dirty"]).current_dir(env!("CARGO_MANIFEST_DIR"))),
-            "rustc": tool::first_line(tool::command("rustc").arg("-V").current_dir(project)),
+            "driver": version::identity(),
+            "rustc": tool::first_line(&mut rustc),
             "os": std::env::consts::OS,
             "arch": std::env::consts::ARCH,
             "cpus": std::thread::available_parallelism().map_or(0, usize::from),
@@ -192,12 +199,10 @@ mod tests {
         tests.errors = 2;
         let outcomes = [lint, tests];
         let path = journal
-            .write(&dir, Path::new("/w"), &outcomes, &End::Failed)
+            .write(&dir, Some(Path::new("/w")), &outcomes, &End::Failed)
             .unwrap();
         let error = End::Error("cannot write /w/target/drive/log/tests.log".to_owned());
-        journal
-            .write(&dir, Path::new("/w"), &outcomes[..1], &error)
-            .unwrap();
+        journal.write(&dir, None, &outcomes[..1], &error).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
 
@@ -221,7 +226,10 @@ mod tests {
         assert_eq!(ran["steps"][1]["seconds"], 1.234);
         assert_eq!(ran["steps"][1]["compiled"], serde_json::json!(["core"]));
         assert_eq!(ran["steps"][1]["errors"], 2);
+        assert_eq!(ran["driver"], version::identity());
         assert_eq!(lines[1]["exit"], 2);
+        // An error before the project is found leaves it out.
+        assert!(lines[1]["project"].is_null());
         // An error keeps the steps that ran before it.
         assert_eq!(
             lines[1]["error"],

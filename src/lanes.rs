@@ -8,6 +8,7 @@ use crate::flag_set::{FlagSet, Targets};
 use crate::member::Member;
 use crate::project_command::{CommandTable, ProjectCommand};
 use crate::reads::{Reader, ReaderTable};
+use crate::version::{Requirement, Version};
 
 /// The OSes a `cross-lint` table may name, as Rust's `std::env::consts::OS` names them.
 const CROSS_HOSTS: [&str; 3] = ["linux", "macos", "windows"];
@@ -55,6 +56,7 @@ pub(crate) enum TestRunner {
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Table {
+    version: Option<String>,
     lint: Option<Vec<Set>>,
     test: Option<Vec<Set>>,
     doc: Option<Set>,
@@ -110,6 +112,18 @@ impl Lanes {
             }
             (None, None) => Table::default(),
         };
+        let Some(text) = table.version else {
+            return Err(ConfigError::NoVersion {
+                running: Version::DRIVER,
+            });
+        };
+        let required = Requirement::parse(&text).ok_or(ConfigError::BadVersion { text })?;
+        if !required.matches(Version::DRIVER) {
+            return Err(ConfigError::OtherVersion {
+                required,
+                running: Version::DRIVER,
+            });
+        }
         let all = || vec![Set::Flags("--all-features".to_owned())];
         let sets = |key: &'static str,
                     sets: Option<Vec<Set>>,
@@ -269,10 +283,23 @@ mod tests {
         ])
     }
 
+    /// Each table with the running driver's `version` unless it names one.
     fn lanes(
         workspace: Option<serde_json::Value>,
         package: Option<serde_json::Value>,
     ) -> Result<Lanes, ConfigError> {
+        let versioned = |table: Option<serde_json::Value>| {
+            table.map(|mut table| {
+                let own = Requirement::of(Version::DRIVER).to_string();
+                table
+                    .as_object_mut()
+                    .expect("a table is an object")
+                    .entry("version")
+                    .or_insert(own.into());
+                table
+            })
+        };
+        let (workspace, package) = (versioned(workspace), versioned(package));
         let owned = features();
         let features: Features<'_> = owned.iter().map(|(k, v)| (k.as_str(), v)).collect();
         let member = |name: &str, binaries: &[&str]| Member {
@@ -298,7 +325,7 @@ mod tests {
 
     #[test]
     fn defaults_and_either_table() {
-        let defaults = lanes(None, None).unwrap();
+        let defaults = lanes_of(json!({}));
         assert_eq!(defaults.lint, [set("--all-features", Targets::Refused)]);
         assert_eq!(defaults.test, [set("--all-features", Targets::Refused)]);
         assert_eq!(defaults.doc, set("--all-features", Targets::Refused));
@@ -440,5 +467,61 @@ mod tests {
             lanes(Some(json!({})), Some(json!({}))),
             Err(ConfigError::TwoTables)
         ));
+    }
+
+    #[test]
+    fn a_root_names_the_driver_it_needs() {
+        let own = Requirement::of(Version::DRIVER);
+        let none = |workspace, package| {
+            let owned = features();
+            let features: Features<'_> = owned.iter().map(|(k, v)| (k.as_str(), v)).collect();
+            Lanes::from_tables(workspace, package, &features, Path::new("/w"), &[])
+                .unwrap_err()
+                .to_string()
+        };
+        let missing = format!(
+            "drive.version: missing; name the driver the root needs, as `version = \"{own}\"` \
+             for this one, {}",
+            Version::DRIVER
+        );
+        assert_eq!(none(None, None), missing);
+        assert_eq!(none(Some(json!({ "docs": true })), None), missing);
+        assert_eq!(none(None, Some(json!({}))), missing);
+
+        let fails =
+            |workspace: serde_json::Value| lanes(Some(workspace), None).unwrap_err().to_string();
+        assert_eq!(
+            fails(json!({ "version": "^0.2" })),
+            "drive.version: `^0.2` is not MAJOR[.MINOR[.PATCH]]"
+        );
+        assert!(matches!(
+            lanes(Some(json!({ "version": 2 })), None),
+            Err(ConfigError::Shape(_))
+        ));
+        // A requirement past the driver's major, and one below it: the driver or the root moves.
+        let newer = "1000";
+        assert_eq!(
+            fails(json!({ "version": newer })),
+            format!(
+                "drive.version: the root needs drive {newer}, and this one is {}; update it: \
+                 cargo install --locked --git {}",
+                Version::DRIVER,
+                env!("CARGO_PKG_REPOSITORY")
+            )
+        );
+        let older = Requirement::parse("0.0.0").unwrap();
+        assert!(!older.matches(Version::DRIVER), "the driver is past 0.0.0");
+        assert_eq!(
+            fails(json!({ "version": "0.0.0" })),
+            format!(
+                "drive.version: the root needs drive 0.0.0, and this one is {}; move the root \
+                 to `version = \"{own}\"`",
+                Version::DRIVER
+            )
+        );
+        assert_eq!(
+            lanes_of(json!({ "version": own.to_string() })),
+            lanes_of(json!({}))
+        );
     }
 }

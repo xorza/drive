@@ -20,9 +20,6 @@ const ROOT_WIDE: [&str; 8] = [
     "rust-toolchain.toml",
 ];
 
-/// The driver's folder in each root, as `.cargo/config.toml`'s alias names it.
-const DRIVER: &str = "drive";
-
 /// A Cargo workspace: one folder, one lockfile, one target folder, and its lanes.
 #[derive(Debug)]
 pub(crate) struct Root {
@@ -200,8 +197,8 @@ impl Root {
     }
 
     /// Whether a file is one the builds and tests read: not in a hidden folder but `.cargo` and
-    /// `.config`, which hold cargo's and nextest's settings, not in this driver's submodule, no
-    /// file of git's own, and no agent's instructions.
+    /// `.config`, which hold cargo's and nextest's settings, no file of git's own, and no agent's
+    /// instructions.
     fn is_input(&self, path: &Path) -> bool {
         let Ok(rel) = path.strip_prefix(&self.dir) else {
             return false;
@@ -219,14 +216,9 @@ impl Root {
             .iter()
             .enumerate()
             .any(|(i, f)| f.starts_with('.') && !settings(i, f));
-        let driver = names[0] == DRIVER
-            && !self
-                .members
-                .iter()
-                .any(|m| m.dir.starts_with(self.dir.join(DRIVER)));
         // Git's own files: a change to what git tracks shows as the files it adds or drops.
         let git = file.starts_with(".git");
-        !hidden && !driver && !git && file != "AGENTS.md" && file != "CLAUDE.md"
+        !hidden && !git && file != "AGENTS.md" && file != "CLAUDE.md"
     }
 
     /// The folder of the workspace that holds the package in `dir`.
@@ -277,6 +269,7 @@ pub(crate) mod internals {
 
     use crate::metadata::Metadata;
     use crate::root::Root;
+    use crate::version::{Requirement, Version};
 
     impl Root {
         /// A root at `/w`: `core`, `app` on `core` (dev-dependency on `core` with `internals`),
@@ -309,7 +302,7 @@ pub(crate) mod internals {
                 "workspace_members": ["core", "app", "harness", "check"],
                 "workspace_root": "/w",
                 "target_directory": "/w/target",
-                "metadata": null,
+                "metadata": { "drive": { "version": Requirement::of(Version::DRIVER).to_string() } },
             });
             let meta: Metadata = serde_json::from_value(meta).unwrap();
             Self::from_metadata(meta, String::new()).unwrap()
@@ -393,10 +386,8 @@ mod tests {
             reach(
                 &root,
                 &[
-                    "/w/drive",
                     "/w/.gitmodules",
                     "/w/core/.gitignore",
-                    "/w/drive/src/main.rs",
                     "/w/.notes/ISSUES.md",
                     "/w/core/.zed/x",
                     "/w/AGENTS.md",

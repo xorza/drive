@@ -13,9 +13,9 @@
 //! `$XDG_STATE_HOME/drive/` or `~/.local/state/drive/` on Linux, `~/Library/Logs/drive/` on
 //! macOS, `%LOCALAPPDATA%\drive\logs\` on Windows.
 //!
-//! A project holds this crate as a git submodule at its workspace root, outside its workspace,
-//! and names it in `.cargo/config.toml`: `drive = "run -q --locked --manifest-path
-//! drive/Cargo.toml --"`.
+//! `cargo install --locked --git https://github.com/xorza/drive` puts `cargo-drive` on `PATH`,
+//! which cargo runs as `cargo drive`. It checks the workspace of the folder it runs in, and each
+//! root names the driver it needs in its table's `version`.
 
 #![expect(
     clippy::print_stdout,
@@ -44,8 +44,9 @@ mod runner;
 mod step;
 mod sweep;
 mod tool;
+mod version;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use crate::cli::Task;
@@ -54,6 +55,7 @@ use crate::invocation::Invocation;
 use crate::journal::{End, Journal};
 use crate::output::Ci;
 use crate::project::Project;
+use crate::root::Root;
 use crate::runner::{Finished, Runner};
 use crate::step::Format;
 
@@ -65,10 +67,13 @@ fn main() -> ExitCode {
         Ci::No
     };
     let mut journal = Journal::start(task.name(), &task.args(), ci);
-    let top = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("the driver sits in its root");
-    let result = run(&task, top, ci, &mut journal);
+    let (top, result) = match top() {
+        Ok(top) => {
+            let result = run(&task, &top, ci, &mut journal);
+            (Some(top), result)
+        }
+        Err(error) => (None, Err(error)),
+    };
     let end = match &result {
         Ok(Finished {
             error: Some(error), ..
@@ -80,7 +85,7 @@ fn main() -> ExitCode {
     let outcomes = result.as_ref().map_or(&[][..], |f| f.outcomes.as_slice());
     // The log serves later analysis: a failure to write it fails no check.
     if let Some(dir) = platform::log_dir()
-        && let Err(error) = journal.write(&dir, top, outcomes, &end)
+        && let Err(error) = journal.write(&dir, top.as_deref(), outcomes, &end)
     {
         eprintln!(
             "warning: cannot write the run log in {}: {error}",
@@ -95,6 +100,15 @@ fn main() -> ExitCode {
             ExitCode::from(2)
         }
     }
+}
+
+/// The workspace of the folder the driver runs in.
+fn top() -> Result<PathBuf> {
+    let here = std::env::current_dir().map_err(|source| Error::Io {
+        path: PathBuf::from("."),
+        source,
+    })?;
+    Root::workspace_of(&here)
 }
 
 fn run(task: &Task, top: &Path, ci: Ci, journal: &mut Journal) -> Result<Finished> {

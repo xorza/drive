@@ -11,8 +11,8 @@ pub(crate) fn cargo() -> Command {
     command(std::env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo")))
 }
 
-/// A process of `program`, by its path or its name on `PATH`, without the variables that `cargo
-/// run` set for the driver alone.
+/// A process of `program`, by its path or its name on `PATH`, without the variables cargo set for
+/// the driver alone.
 #[expect(
     clippy::disallowed_methods,
     reason = "the one place the driver makes a process"
@@ -25,10 +25,11 @@ pub(crate) fn command(program: impl AsRef<OsStr>) -> Command {
     command
 }
 
-/// Whether `cargo run` set the variable for the driver, of its own package: a build the driver
-/// starts that saw it would differ from one started outside it, as a build script that runs
-/// again when `CARGO_MANIFEST_DIR` changes, as `ring`'s does, and each crate above it, would
-/// build again after each build outside the driver.
+/// Whether cargo set the variable for the driver: `CARGO`, as for each subcommand, and under
+/// `cargo run` the variables of the driver's own package. A build the driver starts that saw one
+/// would differ from one started outside it, as a build script that runs again when
+/// `CARGO_MANIFEST_DIR` changes, as `ring`'s does, and each crate above it, would build again
+/// after each build outside the driver.
 pub(crate) fn is_drivers_own(name: &OsStr) -> bool {
     name.to_str().is_some_and(|name| {
         matches!(name, "CARGO" | "CARGO_MANIFEST_DIR" | "CARGO_MANIFEST_PATH")

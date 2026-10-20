@@ -1,13 +1,10 @@
 [package]
-name = "drive"
-version = "0.1.0"
+name = "cargo-drive"
+version = "0.2.0"
 edition = "2024"
 description = "The one way to check, test, document and bench a Cargo workspace"
+repository = "https://github.com/xorza/drive"
 publish = false
-
-# Its own workspace: a project holds this crate as a submodule, outside its own workspace, so the
-# driver's build never touches the project's cache.
-[workspace]
 
 [dependencies]
 # No color or suggestions: crates that only dress up the help text, which agents read plain.

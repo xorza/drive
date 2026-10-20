@@ -2,6 +2,8 @@ use std::fmt;
 use std::io;
 use std::path::PathBuf;
 
+use crate::version::{Requirement, Version};
+
 pub(crate) type Result<T, E = Error> = std::result::Result<T, E>;
 
 /// A usage or project error: printed, then exit 2.
@@ -54,6 +56,18 @@ pub(crate) enum Error {
 #[derive(Debug)]
 pub(crate) enum ConfigError {
     Shape(serde_json::Error),
+    /// No `version`, or no table to hold one.
+    NoVersion {
+        running: Version,
+    },
+    BadVersion {
+        text: String,
+    },
+    /// A `version` the running driver does not meet.
+    OtherVersion {
+        required: Requirement,
+        running: Version,
+    },
     /// Both `[workspace.metadata.drive]` and the root package's `[package.metadata.drive]`.
     TwoTables,
     EmptyList {
@@ -161,6 +175,27 @@ impl fmt::Display for ConfigError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Shape(source) => write!(f, "drive table: {source}"),
+            Self::NoVersion { running } => write!(
+                f,
+                "drive.version: missing; name the driver the root needs, as `version = \"{}\"` \
+                 for this one, {running}",
+                Requirement::of(*running)
+            ),
+            Self::BadVersion { text } => {
+                write!(f, "drive.version: `{text}` is not MAJOR[.MINOR[.PATCH]]")
+            }
+            Self::OtherVersion { required, running } if required.wants_newer(*running) => write!(
+                f,
+                "drive.version: the root needs drive {required}, and this one is {running}; \
+                 update it: cargo install --locked --git {}",
+                env!("CARGO_PKG_REPOSITORY")
+            ),
+            Self::OtherVersion { required, running } => write!(
+                f,
+                "drive.version: the root needs drive {required}, and this one is {running}; \
+                 move the root to `version = \"{}\"`",
+                Requirement::of(*running)
+            ),
             Self::TwoTables => f.write_str(
                 "both [workspace.metadata.drive] and [package.metadata.drive]; keep one",
             ),

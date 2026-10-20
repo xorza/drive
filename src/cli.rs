@@ -42,7 +42,10 @@ impl Task {
     }
 
     fn from_matches(matches: &ArgMatches) -> Self {
-        let (name, sub) = matches.subcommand().expect("a subcommand is required");
+        let drive = matches
+            .subcommand_matches("drive")
+            .expect("cargo runs the driver as `cargo-drive drive`");
+        let (name, sub) = drive.subcommand().expect("a subcommand is required");
         let args = || {
             sub.get_many::<String>("args")
                 .map_or_default(|v| v.cloned().collect())
@@ -78,8 +81,8 @@ fn command() -> Command {
             .value_name("ARGS")
             .help(help)
     };
-    Command::new("drive")
-        .bin_name("cargo drive")
+    // Cargo runs `cargo drive …` as `cargo-drive drive …`: the driver is a subcommand of cargo's.
+    let drive = Command::new("drive")
         .about("The one way to check, test, document and bench the workspace")
         .subcommand_required(true)
         .subcommand(Command::new("check").about(
@@ -127,7 +130,11 @@ fn command() -> Command {
         .subcommand(Command::new("package").about(
             "The release build of the binaries `package` names, each stripped in \
              target/package with its debug info beside it",
-        ))
+        ));
+    Command::new("cargo")
+        .bin_name("cargo")
+        .subcommand_required(true)
+        .subcommand(drive)
 }
 
 #[cfg(test)]
@@ -140,23 +147,33 @@ mod tests {
 
     #[test]
     fn passes_arguments_through() {
-        let check = parse(&["drive", "check"]);
+        let check = parse(&["cargo-drive", "drive", "check"]);
         assert_eq!(check, Task::Sweep(Sweep::Check));
         assert_eq!((check.name(), check.args()), ("check", Vec::new()));
-        let gate = parse(&["drive", "gate"]);
+        let gate = parse(&["cargo-drive", "drive", "gate"]);
         assert_eq!(gate, Task::Sweep(Sweep::Gate));
         assert_eq!((gate.name(), gate.args()), ("gate", Vec::new()));
-        let ci = parse(&["drive", "gate", "--ci"]);
+        let ci = parse(&["cargo-drive", "drive", "gate", "--ci"]);
         assert_eq!(ci, Task::Sweep(Sweep::GateCi));
         assert_eq!((ci.name(), ci.args()), ("gate", vec!["--ci".to_owned()]));
-        let bench = parse(&["drive", "bench", "--test"]);
+        let bench = parse(&["cargo-drive", "drive", "bench", "--test"]);
         assert_eq!(
             (bench.name(), bench.args()),
             ("bench", vec!["--test".to_owned()])
         );
-        assert_eq!(parse(&["drive", "test"]), Task::Test(Vec::new()));
         assert_eq!(
-            parse(&["drive", "test", "-E", "package(lumos)", "--no-capture"]),
+            parse(&["cargo-drive", "drive", "test"]),
+            Task::Test(Vec::new())
+        );
+        assert_eq!(
+            parse(&[
+                "cargo-drive",
+                "drive",
+                "test",
+                "-E",
+                "package(lumos)",
+                "--no-capture"
+            ]),
             Task::Test(
                 ["-E", "package(lumos)", "--no-capture"]
                     .map(str::to_owned)
@@ -164,10 +181,10 @@ mod tests {
             )
         );
         assert_eq!(
-            parse(&["drive", "bench", "--test", "^atomic/"]),
+            parse(&["cargo-drive", "drive", "bench", "--test", "^atomic/"]),
             Task::Bench(["--test", "^atomic/"].map(str::to_owned).to_vec())
         );
-        let lan = parse(&["drive", "run", "lan", "--bless", "out"]);
+        let lan = parse(&["cargo-drive", "drive", "run", "lan", "--bless", "out"]);
         assert_eq!(
             lan,
             Task::Run {
@@ -176,14 +193,15 @@ mod tests {
             }
         );
         assert_eq!((lan.name(), lan.args().len()), ("run", 3));
-        let package = parse(&["drive", "package"]);
+        let package = parse(&["cargo-drive", "drive", "package"]);
         assert_eq!((package.name(), package.args()), ("package", Vec::new()));
         let fails = |argv: &[&str]| command().try_get_matches_from(argv).is_err();
-        assert!(fails(&["drive", "run"]));
-        assert!(fails(&["drive", "package", "x"]));
-        assert!(fails(&["drive"]));
-        assert!(fails(&["drive", "check", "-p", "x"]));
-        assert!(fails(&["drive", "check", "--ci"]));
-        assert!(fails(&["drive", "lint"]));
+        assert!(fails(&["cargo-drive", "drive", "run"]));
+        assert!(fails(&["cargo-drive", "drive", "package", "x"]));
+        assert!(fails(&["cargo-drive", "drive"]));
+        assert!(fails(&["cargo-drive", "drive", "check", "-p", "x"]));
+        assert!(fails(&["cargo-drive", "drive", "check", "--ci"]));
+        assert!(fails(&["cargo-drive", "drive", "lint"]));
+        assert!(fails(&["cargo-drive", "check"]));
     }
 }
