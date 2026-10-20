@@ -52,6 +52,13 @@ pub(crate) struct Split {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum SplitBy {
     /// A tool of the OS, by its name on `PATH`, with its arguments.
+    #[cfg_attr(
+        windows,
+        expect(
+            dead_code,
+            reason = "the linker writes the PDB beside the binary, so each move is a copy"
+        )
+    )]
     Tool {
         program: &'static str,
         args: Vec<OsString>,
