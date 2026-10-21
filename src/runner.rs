@@ -326,7 +326,8 @@ impl<'p> Runner<'p> {
                 continue;
             }
             if !self.trees.contains_key(&repo.top) {
-                let Some(tree) = repo.tree(&scratch)? else {
+                let forced = self.project.tool_files(&repo.top);
+                let Some(tree) = repo.tree(&scratch, &forced)? else {
                     return Ok(None);
                 };
                 self.trees.insert(repo.top.clone(), tree);

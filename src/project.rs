@@ -52,6 +52,15 @@ impl Project {
         &self.roots[0]
     }
 
+    /// The files a tool reads at the top of each root in the repository at `top`, whether or not
+    /// they exist. Every root of the repository shares its tree, so each names them all.
+    pub(crate) fn tool_files(&self, top: &Path) -> Vec<PathBuf> {
+        (self.roots.iter())
+            .filter(|root| root.repo.as_ref().is_some_and(|repo| repo.top == top))
+            .flat_map(Root::tool_files)
+            .collect()
+    }
+
     /// The roots `root` builds through path dependencies, through other roots too.
     pub(crate) fn outside(&self, root: &Root) -> Vec<&Root> {
         let mut found: Vec<&Root> = Vec::new();
@@ -67,5 +76,38 @@ impl Project {
             }
         }
         found
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::git::Repo;
+
+    #[test]
+    fn tool_files_name_every_root_of_the_repository_and_no_other() {
+        let at = |dir: &str, top: Option<&str>| {
+            let mut root = Root::fixture();
+            root.dir = PathBuf::from(dir);
+            root.repo = top.map(|top| Repo::fixture(Path::new(top)));
+            root
+        };
+        let project = Project {
+            roots: vec![
+                at("/w", Some("/w")),
+                at("/w/vendor/lib", Some("/w")),
+                at("/v", Some("/v")),
+                at("/u", None),
+            ],
+        };
+        let files = project.tool_files(Path::new("/w"));
+        // Each of the two roots in `/w`'s repository names all 11 files at its top.
+        assert_eq!(files.len(), 2 * 11);
+        assert_eq!(files[0], Path::new("/w/Cargo.lock"));
+        assert_eq!(files[11], Path::new("/w/vendor/lib/Cargo.lock"));
+        assert!(files.contains(&PathBuf::from("/w/vendor/lib/.cargo/config.toml")));
+        assert!(files.iter().all(|f| f.starts_with("/w")));
+        assert_eq!(project.tool_files(Path::new("/v")).len(), 11);
+        assert!(project.tool_files(Path::new("/x")).is_empty());
     }
 }

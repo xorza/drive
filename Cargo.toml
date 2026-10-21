@@ -1,6 +1,6 @@
 [package]
 name = "cargo-drive"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2024"
 description = "The one way to check, test, document and bench a Cargo workspace"
 repository = "https://github.com/xorza/drive"

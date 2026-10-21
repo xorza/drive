@@ -16,7 +16,7 @@ refuses to run:
 
 ```toml
 [workspace.metadata.drive]   # or [package.metadata.drive] in a single-package root
-version = "0.2.1"
+version = "0.2.2"
 ```
 
 ## Use

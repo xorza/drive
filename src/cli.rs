@@ -141,8 +141,8 @@ fn command() -> Command {
                      ends it",
                 )
                 .arg(Arg::new("ci").long("ci").action(ArgAction::SetTrue).help(
-                    "For CI: list the unformatted files, fail on a lockfile cargo would \
-                     update, and run past failures",
+                    "For CI: list the unformatted files, fail on a committed lockfile cargo \
+                     would update, and run past failures",
                 )),
         )
         .subcommand(

@@ -8,8 +8,9 @@ use crate::member::Member;
 use crate::metadata::Metadata;
 use crate::tool;
 
-/// A file at a root's top whose change can alter every member's build.
-const ROOT_WIDE: [&str; 8] = [
+/// A file at a root's top that a tool reads, whose change can alter every member's build: an
+/// input even where `.gitignore` leaves it out.
+const ROOT_WIDE: [&str; 11] = [
     "Cargo.lock",
     "Cargo.toml",
     "clippy.toml",
@@ -18,7 +19,35 @@ const ROOT_WIDE: [&str; 8] = [
     ".rustfmt.toml",
     "rust-toolchain",
     "rust-toolchain.toml",
+    ".cargo/config.toml",
+    ".cargo/config",
+    ".config/nextest.toml",
 ];
+
+/// Whether a root's commit holds its `Cargo.lock`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Lockfile {
+    /// Git tracks it, or, where git cannot tell, it exists: a run that keeps the files builds it
+    /// as it is.
+    Committed,
+    /// None is committed: cargo resolves the dependencies again, as the project chose.
+    Free,
+}
+
+impl Lockfile {
+    /// The lockfile of the root at `dir`, as `repo` tracks it, or, where git cannot tell, as it
+    /// exists: a stale lockfile then fails loudly rather than going unchecked.
+    fn of(dir: &Path, repo: Option<&Repo>) -> Self {
+        let lock = dir.join("Cargo.lock");
+        let tracked = repo.and_then(|repo| repo.tracks(&lock));
+        let committed = tracked.unwrap_or_else(|| lock.is_file());
+        if committed {
+            Self::Committed
+        } else {
+            Self::Free
+        }
+    }
+}
 
 /// A Cargo workspace: one folder, one lockfile, one target folder, and its lanes.
 #[derive(Debug)]
@@ -32,6 +61,7 @@ pub(crate) struct Root {
     /// Each member whose build that ships turns `internals` on, which the ship lane leaves out.
     pub(crate) unifies_internals: Vec<String>,
     pub(crate) target_dir: PathBuf,
+    pub(crate) lockfile: Lockfile,
     pub(crate) lanes: Lanes,
     pub(crate) repo: Option<Repo>,
 }
@@ -111,8 +141,10 @@ impl Root {
             &members,
         )
         .map_err(|reason| Error::Config { manifest, reason })?;
+        let repo = Repo::find(&meta.workspace_root);
         Ok(Self {
-            repo: Repo::find(&meta.workspace_root),
+            lockfile: Lockfile::of(&meta.workspace_root, repo.as_ref()),
+            repo,
             members,
             unifies_internals: closure(unifying, &normal_dependents).into_iter().collect(),
             dependents,
@@ -222,6 +254,11 @@ impl Root {
         !hidden && !git && file != "AGENTS.md" && file != "CLAUDE.md"
     }
 
+    /// The files at its top that a tool reads, whether or not they exist.
+    pub(crate) fn tool_files(&self) -> impl Iterator<Item = PathBuf> + '_ {
+        ROOT_WIDE.iter().map(|file| self.dir.join(file))
+    }
+
     /// Whether a member's folder holds `dir`.
     pub(crate) fn holds(&self, dir: &Path) -> bool {
         self.members.iter().any(|m| dir.starts_with(&m.dir))
@@ -257,13 +294,13 @@ pub(crate) mod internals {
     use serde_json::json;
 
     use crate::metadata::Metadata;
-    use crate::root::Root;
+    use crate::root::{Lockfile, Root};
     use crate::version::{Requirement, Version};
 
     impl Root {
         /// A root at `/w`: `core`, `app` on `core` (dev-dependency on `core` with `internals`),
         /// `harness` on `core` with `internals`, `check` on `harness`, and `app` on `/w/gui`
-        /// by path.
+        /// by path; its lockfile committed.
         pub(crate) fn fixture() -> Self {
             let dep = |name: &str, kind: Option<&str>, features: &[&str], path: Option<&str>| json!({ "name": name, "kind": kind, "optional": false, "features": features, "path": path });
             let package = |name: &str,
@@ -294,7 +331,10 @@ pub(crate) mod internals {
                 "metadata": { "drive": { "version": Requirement::of(Version::DRIVER).to_string() } },
             });
             let meta: Metadata = serde_json::from_value(meta).unwrap();
-            Self::from_metadata(meta, String::new()).unwrap()
+            Self {
+                lockfile: Lockfile::Committed,
+                ..Self::from_metadata(meta, String::new()).unwrap()
+            }
         }
     }
 }
@@ -311,6 +351,24 @@ mod tests {
 
     fn members(names: &[&str]) -> Reach {
         Reach::Members(names.iter().map(|&n| n.to_owned()).collect())
+    }
+
+    #[test]
+    fn a_lockfile_is_committed_when_git_tracks_it_or_outside_git_when_it_exists() {
+        let dir = std::env::temp_dir().join(format!("drive-lockfile-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(Lockfile::of(&dir, None), Lockfile::Free);
+        std::fs::write(dir.join("Cargo.lock"), "").unwrap();
+        assert_eq!(Lockfile::of(&dir, None), Lockfile::Committed);
+        // In git, the same file untracked, as `.gitignore` leaves it, is none committed.
+        let init = tool::command("git")
+            .args(["init", "-q"])
+            .current_dir(&dir)
+            .status();
+        assert!(init.unwrap().success());
+        let repo = Repo::find(&dir).unwrap();
+        assert_eq!(Lockfile::of(&repo.top, Some(&repo)), Lockfile::Free);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

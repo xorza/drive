@@ -11,8 +11,8 @@ pub(crate) enum Sweep {
     /// tests, the root's commands that join it, and the build of every bench, rustdoc and the doc
     /// tests where the root asks for them, to the first failure.
     Gate,
-    /// Every lane for CI, which can change no file, the lockfile among them, and reports every
-    /// failure of one run.
+    /// Every lane for CI, which can change no file the commit holds, its lockfile among them, and
+    /// reports every failure of one run.
     GateCi,
 }
 

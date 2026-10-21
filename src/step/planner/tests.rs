@@ -62,7 +62,7 @@ fn lane_commands() {
 }
 
 #[test]
-fn a_run_that_writes_files_formats_them_and_lets_cargo_update_the_lockfile() {
+fn a_run_that_keeps_files_checks_the_format_and_locks_only_a_committed_lockfile() {
     let mut root = Root::fixture();
     root.lanes.docs = true;
     root.lanes.gate_benches = true;
@@ -74,14 +74,14 @@ fn a_run_that_writes_files_formats_them_and_lets_cargo_update_the_lockfile() {
     )];
     root.lanes.package = vec!["app".to_owned()];
     let out = Path::new("/w/target/package");
-    let steps = |files| {
-        let planner = Planner::new(&root, files);
+    let steps = |root: &Root, files| {
+        let planner = Planner::new(root, files);
         let mut steps = planner.every(Sweep::Gate);
         steps.extend(planner.bench(&[]));
         steps.extend(planner.package(out).into_iter().take(1));
         steps
     };
-    let (kept, written) = (steps(Files::Keep), steps(Files::Write));
+    let (kept, written) = (steps(&root, Files::Keep), steps(&root, Files::Write));
     let names: Vec<&str> = kept.iter().map(|s| s.name.as_str()).collect();
     assert_eq!(
         names,
@@ -104,6 +104,11 @@ fn a_run_that_writes_files_formats_them_and_lets_cargo_update_the_lockfile() {
         assert!(!less.contains(&flag.to_owned()));
         assert_eq!(less, written.words(), "{}", kept.name);
     }
+    // With no lockfile committed, cargo resolves again: only fmt's `--check` stays.
+    root.lockfile = Lockfile::Free;
+    let free = steps(&root, Files::Keep);
+    assert_eq!(free[0], kept[0]);
+    assert_eq!(free[1..], written[1..]);
 }
 
 /// A command of `steps`, a table's, joining `joins`.

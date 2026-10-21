@@ -7,7 +7,7 @@ use crate::flag_set::FlagSet;
 use crate::lanes::TestRunner;
 use crate::platform::{self, SplitBy};
 use crate::project_command::{CommandStep, Joins, ProjectCommand, StepWhat};
-use crate::root::Root;
+use crate::root::{Lockfile, Root};
 use crate::step::{Kind, Program, Runs, SharedPass, Step};
 use crate::sweep::Sweep;
 
@@ -40,17 +40,6 @@ pub(crate) enum Files {
     Keep,
 }
 
-impl Files {
-    /// Cargo's flags for the lockfile. `--locked` is in no fingerprint, so a run that keeps the
-    /// files reuses the build of one that writes them.
-    const fn lock(self) -> &'static [&'static str] {
-        match self {
-            Self::Write => &[],
-            Self::Keep => &["--locked"],
-        }
-    }
-}
-
 /// The steps of one root's lanes, each as `files` allows.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Planner<'r> {
@@ -61,6 +50,16 @@ pub(crate) struct Planner<'r> {
 impl<'r> Planner<'r> {
     pub(crate) const fn new(root: &'r Root, files: Files) -> Self {
         Self { root, files }
+    }
+
+    /// Cargo's flags for the lockfile: `--locked` where the run keeps the files and the commit
+    /// holds one to keep. It is in no fingerprint, so a run that keeps the files reuses the build
+    /// of one that writes them.
+    const fn lock(self) -> &'static [&'static str] {
+        match (self.files, self.root.lockfile) {
+            (Files::Keep, Lockfile::Committed) => &["--locked"],
+            (Files::Write, _) | (_, Lockfile::Free) => &[],
+        }
     }
 
     /// The members alone: `--all` also formats path dependencies, which their own roots format.
@@ -85,7 +84,7 @@ impl<'r> Planner<'r> {
     fn lint(self, name: &str, set: &FlagSet, target: Option<&str>) -> Step {
         let mut argv = vec!["clippy", "--workspace", "--all-targets"];
         argv.extend(set.args());
-        argv.extend(self.files.lock());
+        argv.extend(self.lock());
         argv.extend(["--keep-going", JSON]);
         if let Some(target) = target {
             argv.extend(["--target", target]);
@@ -102,7 +101,7 @@ impl<'r> Planner<'r> {
     /// lints its code.
     pub(crate) fn ship(self) -> Step {
         let mut argv = vec!["clippy", "--workspace"];
-        argv.extend(self.files.lock());
+        argv.extend(self.lock());
         argv.extend(["--keep-going", JSON]);
         for name in &self.root.unifies_internals {
             argv.extend(["--exclude", name]);
@@ -120,7 +119,7 @@ impl<'r> Planner<'r> {
             "--document-private-items",
         ];
         argv.extend(set.args());
-        argv.extend(self.files.lock());
+        argv.extend(self.lock());
         argv.push(JSON);
         let env = vec![("RUSTDOCFLAGS".to_owned(), Some("-D warnings".to_owned()))];
         Step {
@@ -150,7 +149,7 @@ impl<'r> Planner<'r> {
         argv.extend(set.args());
         match self.root.lanes.test_runner {
             TestRunner::Nextest => {
-                argv.extend(self.files.lock());
+                argv.extend(self.lock());
                 argv.extend(["--cargo-message-format", "json-diagnostic-short"]);
                 argv.extend(QUIET_NEXTEST);
             }
@@ -159,7 +158,7 @@ impl<'r> Planner<'r> {
                 if set.targets.is_empty() {
                     argv.push("--tests");
                 }
-                argv.extend(self.files.lock());
+                argv.extend(self.lock());
                 argv.push(JSON);
                 if !extra.is_empty() {
                     argv.push("--");
@@ -184,7 +183,7 @@ impl<'r> Planner<'r> {
         let mut argv = vec!["build", "--workspace"];
         argv.extend(EVERY_BENCH);
         argv.extend(set.args());
-        argv.extend(self.files.lock());
+        argv.extend(self.lock());
         argv.push(JSON);
         Some(Step {
             label: set.label(),
@@ -200,7 +199,7 @@ impl<'r> Planner<'r> {
         let set = self.root.lanes.test[0].features_only();
         let mut argv = vec!["test", "--workspace", "--doc"];
         argv.extend(set.args());
-        argv.extend(self.files.lock());
+        argv.extend(self.lock());
         argv.push(JSON);
         Some(Step {
             runs,
@@ -220,7 +219,7 @@ impl<'r> Planner<'r> {
             return None;
         }
         let mut argv = vec!["bench"];
-        argv.extend(self.files.lock());
+        argv.extend(self.lock());
         for name in benches {
             argv.extend(["-p", name]);
         }
@@ -268,14 +267,14 @@ impl<'r> Planner<'r> {
             let mut built = match &step.what {
                 StepWhat::Build(cargo) => {
                     let mut argv = strs(cargo);
-                    argv.extend(self.files.lock());
+                    argv.extend(self.lock());
                     argv.push(JSON);
                     argv.extend(given.iter().map(String::as_str));
                     Step::new(root, &name, Kind::Check, argv)
                 }
                 StepWhat::Cargo(cargo) => {
                     let mut argv = strs(cargo);
-                    argv.extend(self.files.lock());
+                    argv.extend(self.lock());
                     if !given.is_empty() {
                         argv.push("--");
                     }
@@ -359,7 +358,7 @@ impl<'r> Planner<'r> {
     pub(crate) fn package(self, out: &Path) -> Vec<Step> {
         let root = self.root;
         let mut argv = vec!["build", "--release"];
-        argv.extend(self.files.lock());
+        argv.extend(self.lock());
         argv.push(JSON);
         for name in &root.lanes.package {
             argv.extend(["--bin", name.as_str()]);
