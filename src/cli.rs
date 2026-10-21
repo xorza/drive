@@ -1,5 +1,7 @@
 use clap::{Arg, ArgAction, ArgMatches, Command};
 
+use crate::output::Ci;
+use crate::step::planner::Files;
 use crate::sweep::Sweep;
 
 /// One command of `cargo drive`.
@@ -46,6 +48,17 @@ impl Task {
         let title = self.title();
         let name = title.replace(|c: char| !c.is_ascii_alphanumeric() && c != '_', "-");
         format!("last-{name}.txt")
+    }
+
+    /// Whether it may change the files it checks, run in `ci`: a sweep as it says, a release
+    /// build never, any other command only outside CI. A release and a run in CI stand for the
+    /// commit, so they build its lockfile.
+    pub(crate) const fn files(&self, ci: Ci) -> Files {
+        match (self, ci) {
+            (Self::Sweep(sweep), _) => sweep.files(),
+            (Self::Package, _) | (_, Ci::GitHub) => Files::Keep,
+            (Self::Test(_) | Self::Bench(_) | Self::Run { .. }, Ci::No) => Files::Write,
+        }
     }
 
     pub(crate) fn args(&self) -> Vec<String> {
@@ -127,12 +140,10 @@ fn command() -> Command {
                      rustdoc and the doc tests where the drive table asks; the first failure \
                      ends it",
                 )
-                .arg(
-                    Arg::new("ci")
-                        .long("ci")
-                        .action(ArgAction::SetTrue)
-                        .help("For CI: list the unformatted files, and run past failures"),
-                ),
+                .arg(Arg::new("ci").long("ci").action(ArgAction::SetTrue).help(
+                    "For CI: list the unformatted files, fail on a lockfile cargo would \
+                     update, and run past failures",
+                )),
         )
         .subcommand(
             Command::new("run")
@@ -224,6 +235,13 @@ mod tests {
         );
         let package = parse(&["cargo-drive", "drive", "package"]);
         assert_eq!((package.name(), package.args()), ("package", Vec::new()));
+        let files = |task: &Task| [Ci::No, Ci::GitHub].map(|ci| task.files(ci));
+        assert_eq!(files(&check), [Files::Write; 2]);
+        assert_eq!(files(&ci), [Files::Keep; 2]);
+        assert_eq!(files(&package), [Files::Keep; 2]);
+        for task in [&bench, &lan, &Task::Test(Vec::new())] {
+            assert_eq!(files(task), [Files::Write, Files::Keep]);
+        }
         let fails = |argv: &[&str]| command().try_get_matches_from(argv).is_err();
         assert!(fails(&["cargo-drive", "drive", "run"]));
         assert!(fails(&["cargo-drive", "drive", "package", "x"]));

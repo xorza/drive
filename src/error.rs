@@ -33,7 +33,8 @@ pub(crate) enum Error {
     NoBenches {
         dir: PathBuf,
     },
-    /// A command that formats the checkout and stops at the first failure, run in CI.
+    /// A command that formats the checkout, updates its lockfile and stops at the first failure,
+    /// run in CI.
     LocalInCi {
         command: &'static str,
     },
@@ -143,8 +144,8 @@ impl fmt::Display for Error {
             Self::NoBenches { dir } => write!(f, "no member of {} has a bench", dir.display()),
             Self::LocalInCi { command } => write!(
                 f,
-                "`cargo drive {command}` formats the checkout and stops at the first failure; \
-                 CI runs `cargo drive gate --ci`"
+                "`cargo drive {command}` formats the checkout, updates its lockfile and stops at \
+                 the first failure; CI runs `cargo drive gate --ci`"
             ),
             Self::UnknownCommand { name, known } if known.is_empty() => {
                 write!(

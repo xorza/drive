@@ -1,5 +1,5 @@
 use crate::runner::OnFail;
-use crate::step::Format;
+use crate::step::planner::Files;
 
 /// A command that runs fixed lanes on every root: `check`, or `gate` with or without `--ci`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -11,7 +11,8 @@ pub(crate) enum Sweep {
     /// tests, the root's commands that join it, and the build of every bench, rustdoc and the doc
     /// tests where the root asks for them, to the first failure.
     Gate,
-    /// Every lane for CI, which can change no file and reports every failure of one run.
+    /// Every lane for CI, which can change no file, the lockfile among them, and reports every
+    /// failure of one run.
     GateCi,
 }
 
@@ -23,10 +24,10 @@ impl Sweep {
         }
     }
 
-    pub(crate) const fn format(self) -> Format {
+    pub(crate) const fn files(self) -> Files {
         match self {
-            Self::Check | Self::Gate => Format::Write,
-            Self::GateCi => Format::Check,
+            Self::Check | Self::Gate => Files::Write,
+            Self::GateCi => Files::Keep,
         }
     }
 
@@ -43,14 +44,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn only_ci_checks_the_format_and_runs_past_failures() {
-        let of = |s: Sweep| (s.name(), s.format(), s.on_fail());
+    fn only_ci_keeps_the_files_and_runs_past_failures() {
+        let of = |s: Sweep| (s.name(), s.files(), s.on_fail());
         assert_eq!(
             [Sweep::Check, Sweep::Gate, Sweep::GateCi].map(of),
             [
-                ("check", Format::Write, OnFail::Stop),
-                ("gate", Format::Write, OnFail::Stop),
-                ("gate", Format::Check, OnFail::Continue),
+                ("check", Files::Write, OnFail::Stop),
+                ("gate", Files::Write, OnFail::Stop),
+                ("gate", Files::Keep, OnFail::Continue),
             ]
         );
     }

@@ -66,7 +66,7 @@ use crate::journal::{End, Journal, Record};
 use crate::output::Ci;
 use crate::project::Project;
 use crate::runner::{Finished, Runner};
-use crate::step::Format;
+use crate::step::planner::Files;
 
 fn main() -> ExitCode {
     let task = Task::parse();
@@ -165,16 +165,15 @@ fn run(task: &Task, journal: &mut Journal, cx: &mut Context) -> Result<Finished>
             );
         }
     }
-    if let Task::Sweep(sweep) = task
-        && sweep.format() == Format::Write
-        && cx.console.ci() == Ci::GitHub
-    {
+    let ci = cx.console.ci();
+    let files = task.files(ci);
+    if ci == Ci::GitHub && files == Files::Write {
         return Err(Error::LocalInCi {
-            command: sweep.name(),
+            command: task.name(),
         });
     }
     let project = Project::load(&cx.here)?;
     journal.loaded();
-    let invocation = Invocation::new(task, &project)?;
+    let invocation = Invocation::new(task, &project, files)?;
     Ok(Runner::new(&project, invocation.reuse, cx)?.run(&invocation.plans, invocation.on_fail))
 }
