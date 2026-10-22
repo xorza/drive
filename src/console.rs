@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
-use crate::output::Ci;
+use crate::ci::Ci;
 
 /// The driver's terminal. Outside CI it keeps each line it prints for the run's output file: an
 /// agent that reads only the last lines of a run reads the rest there, not in a second run. CI

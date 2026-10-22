@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use crate::platform::{Split, SplitBy, Var};
 
-pub(super) fn log_dir(var: Var<'_>) -> Option<PathBuf> {
+pub(super) fn journal_dir(var: Var<'_>) -> Option<PathBuf> {
     Some(
         PathBuf::from(var("LOCALAPPDATA")?)
             .join("drive")

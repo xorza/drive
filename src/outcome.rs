@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use crate::capture::FIRST_LINES;
 use crate::step::Step;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -60,11 +61,41 @@ impl Outcome {
     ) -> Self {
         let (status, note) = match copied {
             Ok(()) => (Status::Ok, String::new()),
-            Err(error) => (Status::Fail, format!("{}: {error}", step.program_name())),
+            Err(error) => (Status::Fail, format!("{}: {error}", step.action_name())),
         };
         Self {
             elapsed,
             log: Some(log),
+            ..Self::not_run(&step.name, status, note)
+        }
+    }
+
+    /// The vocabulary the driver wrote to `out`, in `elapsed`, logged in `log`: it fails on each
+    /// Rust file that does not parse, which `unparsed` names with its error.
+    pub(crate) fn listed(
+        step: &Step,
+        unparsed: Vec<String>,
+        out: &Path,
+        elapsed: Duration,
+        log: PathBuf,
+    ) -> Self {
+        let (status, note) = match unparsed.len() {
+            0 => (Status::Ok, out.display().to_string()),
+            1 => (
+                Status::Fail,
+                format!("1 Rust file does not parse; {}", out.display()),
+            ),
+            n => (
+                Status::Fail,
+                format!("{n} Rust files do not parse; {}", out.display()),
+            ),
+        };
+        Self {
+            elapsed,
+            log: Some(log),
+            lines: unparsed.len(),
+            errors: unparsed.len(),
+            first: unparsed.into_iter().take(FIRST_LINES).collect(),
             ..Self::not_run(&step.name, status, note)
         }
     }
@@ -121,6 +152,8 @@ impl Outcome {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::root::Root;
+    use crate::step::planner::{Files, Planner};
 
     #[test]
     fn line_names_the_log_of_a_failure_only() {
@@ -142,6 +175,38 @@ mod tests {
         assert_eq!(
             outcome.line(4, Path::new("/elsewhere")),
             "lint  FAIL    12.3 s  /w/target/drive/log/lint.log  2 errors"
+        );
+        let step = Planner::new(&Root::fixture(), Files::Keep).vocabulary(PathBuf::from("/w/v"));
+        let out = Path::new("target/drive/vocabulary.txt");
+        let listed = |unparsed: usize| {
+            let lines = (0..unparsed).map(|i| format!("a{i}.rs: expected identifier"));
+            Outcome::listed(
+                &step,
+                lines.collect(),
+                out,
+                Duration::ZERO,
+                PathBuf::from("/w/l"),
+            )
+        };
+        assert_eq!(
+            listed(0).line(10, base),
+            "vocabulary  ok       0.0 s  target/drive/vocabulary.txt"
+        );
+        assert_eq!(
+            listed(1).note,
+            "1 Rust file does not parse; target/drive/vocabulary.txt"
+        );
+        // The digest shows the first ten again, and counts the two past them.
+        let many = listed(12);
+        assert_eq!(
+            (many.status, many.errors, many.lines),
+            (Status::Fail, 12, 12)
+        );
+        assert_eq!(many.first.len(), FIRST_LINES);
+        assert_eq!(many.first[9], "a9.rs: expected identifier");
+        assert_eq!(
+            many.note,
+            "12 Rust files do not parse; target/drive/vocabulary.txt"
         );
         let skipped = Outcome::skipped("tests", String::new());
         assert!(!skipped.reused);

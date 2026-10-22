@@ -21,8 +21,8 @@ use xdg as os;
 
 /// The folder of the run log, as the OS's convention places a tool's history; `None` when the
 /// environment names no home folder, and then nothing is logged.
-pub(crate) fn log_dir() -> Option<PathBuf> {
-    os::log_dir(&|name| std::env::var_os(name))
+pub(crate) fn journal_dir() -> Option<PathBuf> {
+    os::journal_dir(&|name| std::env::var_os(name))
 }
 
 /// An environment variable's value, for a rule that reads them.

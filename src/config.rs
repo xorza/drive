@@ -7,7 +7,7 @@ use crate::error::ConfigError;
 use crate::flag_set::{FlagSet, Targets};
 use crate::member::Member;
 use crate::project_command::{CommandTable, ProjectCommand};
-use crate::reads::{Reader, ReaderTable};
+use crate::reader::{Reader, ReaderTable};
 use crate::version::{Requirement, Version};
 
 /// The OSes a `cross-lint` table may name, as Rust's `std::env::consts::OS` names them.
@@ -16,7 +16,7 @@ const CROSS_HOSTS: [&str; 3] = ["linux", "macos", "windows"];
 /// A root's lanes and its own commands, from its `drive` table: `[workspace.metadata.drive]`, or
 /// `[package.metadata.drive]` in a root that is one package.
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) struct Lanes {
+pub(crate) struct Config {
     /// `clippy --all-targets`, one lane each.
     pub(crate) lint: Vec<FlagSet>,
     /// nextest, one lane each; the doc tests take the first one's features.
@@ -95,7 +95,7 @@ struct AllBut {
 /// Each member's features, by member name, as its manifest declares them.
 pub(crate) type Features<'m> = BTreeMap<&'m str, &'m BTreeMap<String, Vec<String>>>;
 
-impl Lanes {
+impl Config {
     /// `workspace` is `[workspace.metadata.drive]`, `package` the root package's; `dir` is the
     /// root's folder, which the paths `reads` names are taken from.
     pub(crate) fn from_tables(
@@ -284,10 +284,10 @@ mod tests {
     }
 
     /// Each table with the running driver's `version` unless it names one.
-    fn lanes(
+    fn config(
         workspace: Option<serde_json::Value>,
         package: Option<serde_json::Value>,
-    ) -> Result<Lanes, ConfigError> {
+    ) -> Result<Config, ConfigError> {
         let versioned = |table: Option<serde_json::Value>| {
             table.map(|mut table| {
                 let own = Requirement::of(Version::DRIVER).to_string();
@@ -312,11 +312,11 @@ mod tests {
         };
         let members = [member("app", &["app", "tool"]), member("core", &[])];
         let dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-        Lanes::from_tables(workspace, package, &features, dir, &members)
+        Config::from_tables(workspace, package, &features, dir, &members)
     }
 
-    fn lanes_of(workspace: serde_json::Value) -> Lanes {
-        lanes(Some(workspace), None).unwrap()
+    fn config_of(workspace: serde_json::Value) -> Config {
+        config(Some(workspace), None).unwrap()
     }
 
     fn set(text: &str, targets: Targets) -> FlagSet {
@@ -325,25 +325,25 @@ mod tests {
 
     #[test]
     fn defaults_and_either_table() {
-        let defaults = lanes_of(json!({}));
+        let defaults = config_of(json!({}));
         assert_eq!(defaults.lint, [set("--all-features", Targets::Refused)]);
         assert_eq!(defaults.test, [set("--all-features", Targets::Refused)]);
         assert_eq!(defaults.doc, set("--all-features", Targets::Refused));
         assert_eq!(defaults.bench, FlagSet::default());
         assert!(!defaults.docs);
-        assert!(lanes_of(json!({ "docs": true })).docs);
+        assert!(config_of(json!({ "docs": true })).docs);
         assert_eq!(defaults.test_runner, TestRunner::Nextest);
         assert!(!defaults.gate_benches && defaults.cross_lint.is_empty());
         assert!(defaults.package.is_empty() && defaults.reads.is_empty());
         assert!(defaults.commands.is_empty());
         assert_eq!(
-            lanes_of(json!({ "test-runner": "cargo-test" })).test_runner,
+            config_of(json!({ "test-runner": "cargo-test" })).test_runner,
             TestRunner::CargoTest
         );
 
         let table = json!({ "lint": ["--all-features", ""], "test": ["--lib --test alloc"], "bench": "--features wgpu" });
-        let from_package = lanes(None, Some(table.clone())).unwrap();
-        assert_eq!(from_package, lanes(Some(table), None).unwrap());
+        let from_package = config(None, Some(table.clone())).unwrap();
+        assert_eq!(from_package, config(Some(table), None).unwrap());
         assert_eq!(
             from_package.lint,
             [set("--all-features", Targets::Refused), FlagSet::default()]
@@ -359,7 +359,7 @@ mod tests {
     fn all_features_but_lists_every_other_member_feature() {
         let table = json!({ "test": [{ "all-features-but": ["core/real-data", "app/tracy"] }] });
         // app/tracy turns on `gui/tracy`, a feature of no member, and is left out by name.
-        let test = lanes(Some(table), None).unwrap().test;
+        let test = config(Some(table), None).unwrap().test;
         let expected = FlagSet {
             but: vec!["core/real-data".to_owned(), "app/tracy".to_owned()],
             ..set(
@@ -377,7 +377,7 @@ mod tests {
 
     #[test]
     fn the_root_s_own_keys() {
-        let own = lanes_of(json!({
+        let own = config_of(json!({
             "gate-benches": true,
             "cross-lint": { (std::env::consts::OS): ["x86_64-pc-windows-gnu"] },
             "package": ["tool", "app"],
@@ -404,13 +404,13 @@ mod tests {
             "linux"
         };
         assert!(
-            lanes_of(json!({ "cross-lint": { (other): ["t"] } }))
+            config_of(json!({ "cross-lint": { (other): ["t"] } }))
                 .cross_lint
                 .is_empty()
         );
 
         let fails =
-            |workspace: serde_json::Value| lanes(Some(workspace), None).unwrap_err().to_string();
+            |workspace: serde_json::Value| config(Some(workspace), None).unwrap_err().to_string();
         assert_eq!(
             fails(json!({ "cross-lint": { "plan9": ["t"] } })),
             "drive.cross-lint: `plan9` is not `linux`, `macos` or `windows`"
@@ -428,7 +428,7 @@ mod tests {
     #[test]
     fn refuses_a_bad_table() {
         let fails =
-            |workspace: serde_json::Value| lanes(Some(workspace), None).unwrap_err().to_string();
+            |workspace: serde_json::Value| config(Some(workspace), None).unwrap_err().to_string();
         assert_eq!(
             fails(json!({ "lint": [] })),
             "drive.lint: must be a non-empty list"
@@ -444,7 +444,7 @@ mod tests {
             );
         }
         assert_eq!(
-            lanes_of(json!({ "doc": "--features gpu", "docs": true })).doc,
+            config_of(json!({ "doc": "--features gpu", "docs": true })).doc,
             set("--features gpu", Targets::Refused)
         );
         assert_eq!(
@@ -464,7 +464,7 @@ mod tests {
         // The lanes of each command are fixed.
         assert!(fails(json!({ "gate": ["fmt"] })).starts_with("drive table: unknown field `gate`"));
         assert!(matches!(
-            lanes(Some(json!({})), Some(json!({}))),
+            config(Some(json!({})), Some(json!({}))),
             Err(ConfigError::TwoTables)
         ));
     }
@@ -475,7 +475,7 @@ mod tests {
         let none = |workspace, package| {
             let owned = features();
             let features: Features<'_> = owned.iter().map(|(k, v)| (k.as_str(), v)).collect();
-            Lanes::from_tables(workspace, package, &features, Path::new("/w"), &[])
+            Config::from_tables(workspace, package, &features, Path::new("/w"), &[])
                 .unwrap_err()
                 .to_string()
         };
@@ -489,13 +489,13 @@ mod tests {
         assert_eq!(none(None, Some(json!({}))), missing);
 
         let fails =
-            |workspace: serde_json::Value| lanes(Some(workspace), None).unwrap_err().to_string();
+            |workspace: serde_json::Value| config(Some(workspace), None).unwrap_err().to_string();
         assert_eq!(
             fails(json!({ "version": "^0.2" })),
             "drive.version: `^0.2` is not MAJOR[.MINOR[.PATCH]]"
         );
         assert!(matches!(
-            lanes(Some(json!({ "version": 2 })), None),
+            config(Some(json!({ "version": 2 })), None),
             Err(ConfigError::Shape(_))
         ));
         // A requirement past the driver's major, and one below it: the driver or the root moves.
@@ -520,8 +520,8 @@ mod tests {
             )
         );
         assert_eq!(
-            lanes_of(json!({ "version": own.to_string() })),
-            lanes_of(json!({}))
+            config_of(json!({ "version": own.to_string() })),
+            config_of(json!({}))
         );
     }
 }

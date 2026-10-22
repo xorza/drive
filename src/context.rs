@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
+use crate::ci::Ci;
 use crate::console::Console;
-use crate::output::Ci;
 use crate::tools::Tools;
 
 /// What every part of one run shares: the folder it runs in, its terminal, and the tools it

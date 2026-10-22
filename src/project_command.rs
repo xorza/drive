@@ -2,8 +2,8 @@ use std::collections::BTreeMap;
 
 use serde::Deserialize;
 
+use crate::config::TestRunner;
 use crate::error::ConfigError;
-use crate::lanes::TestRunner;
 
 /// A command of the project's own, `cargo drive run <name> [args]`, as its `commands.<name>`
 /// table gives it: its steps, in order, and the command of the driver whose run it joins too.
@@ -27,7 +27,7 @@ pub(crate) enum Joins {
 /// One step of a project command.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CommandStep {
-    pub(crate) what: StepWhat,
+    pub(crate) action: CommandAction,
     /// Variables it sets.
     pub(crate) env: Vec<(String, String)>,
     /// Whether the command's arguments go to it, after cargo's own for a cargo step.
@@ -36,7 +36,7 @@ pub(crate) struct CommandStep {
 
 /// What a step of a project command runs.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum StepWhat {
+pub(crate) enum CommandAction {
     /// A cargo build or lint, whose diagnostics the driver reads: cargo's arguments.
     Build(Vec<String>),
     /// Another cargo command, whose output is its own, as `run`: cargo's arguments.
@@ -111,12 +111,14 @@ impl StepTable {
         runner: TestRunner,
     ) -> Result<CommandStep, ConfigError> {
         let words = |text: String| text.split_whitespace().map(str::to_owned).collect();
-        let what = match (self.build, self.cargo, self.program, self.tests) {
-            (Some(build), None, None, None) => StepWhat::Build(words(build)),
-            (None, Some(cargo), None, None) => StepWhat::Cargo(words(cargo)),
-            (None, None, Some(program), None) if !program.is_empty() => StepWhat::Program(program),
+        let action = match (self.build, self.cargo, self.program, self.tests) {
+            (Some(build), None, None, None) => CommandAction::Build(words(build)),
+            (None, Some(cargo), None, None) => CommandAction::Cargo(words(cargo)),
+            (None, None, Some(program), None) if !program.is_empty() => {
+                CommandAction::Program(program)
+            }
             (None, None, None, Some(tests)) if runner == TestRunner::Nextest => {
-                StepWhat::Tests(tests)
+                CommandAction::Tests(tests)
             }
             (None, None, None, Some(_)) => {
                 return Err(ConfigError::TestsNeedNextest {
@@ -131,7 +133,7 @@ impl StepTable {
             }
         };
         Ok(CommandStep {
-            what,
+            action,
             env: self.env.into_iter().collect(),
             takes_args: self.args,
         })
@@ -166,15 +168,15 @@ mod tests {
         .unwrap();
         assert_eq!(lan.joins, Some(Joins::Gate));
         assert!(lan.takes_args());
-        let whats: Vec<&StepWhat> = lan.steps.iter().map(|step| &step.what).collect();
+        let actions: Vec<&CommandAction> = lan.steps.iter().map(|step| &step.action).collect();
         let owned = |words: &[&str]| words.iter().map(|&w| w.to_owned()).collect();
         assert_eq!(
-            whats,
+            actions,
             [
-                &StepWhat::Build(owned(&["build", "--bins", "-p", "check"])),
-                &StepWhat::Program(owned(&["{target}/debug/check{exe}", "out"])),
-                &StepWhat::Tests("test(=index)".to_owned()),
-                &StepWhat::Cargo(owned(&["run", "-p", "check"])),
+                &CommandAction::Build(owned(&["build", "--bins", "-p", "check"])),
+                &CommandAction::Program(owned(&["{target}/debug/check{exe}", "out"])),
+                &CommandAction::Tests("test(=index)".to_owned()),
+                &CommandAction::Cargo(owned(&["run", "-p", "check"])),
             ]
         );
         assert_eq!(lan.steps[2].env, [("BLESS".to_owned(), "1".to_owned())]);

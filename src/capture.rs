@@ -6,6 +6,7 @@ use std::sync::Mutex;
 
 use serde::Deserialize;
 
+use crate::ci::Ci;
 use crate::console::Console;
 use crate::step::Kind;
 
@@ -15,7 +16,7 @@ const HEAD_LINES: usize = 150;
 const TAIL_LINES: usize = 50;
 /// The lines of its own a failed step shows again at the end of the run: the first ones, as a
 /// tool prints a failure's name and its first error first.
-const FIRST_LINES: usize = 10;
+pub(crate) const FIRST_LINES: usize = 10;
 
 /// Cargo's progress, which a step does not print.
 const PROGRESS: [&str; 15] = [
@@ -35,13 +36,6 @@ const PROGRESS: [&str; 15] = [
     "Running",
     "Scraping",
 ];
-
-/// Whether the driver runs in GitHub Actions, which prints each step's whole output in a group.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Ci {
-    No,
-    GitHub,
-}
 
 /// What a step printed and counted, and how its process ended.
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -292,42 +286,44 @@ pub(crate) struct Capture<'n> {
     pub(crate) log_name: &'n str,
 }
 
-/// Runs `command`, its output through the filter into the log.
-pub(crate) fn run(
-    command: &mut Command,
-    capture: Capture<'_>,
-    console: &mut Console,
-) -> std::io::Result<Report> {
-    let Capture {
-        kind,
-        log,
-        log_name,
-    } = capture;
-    let mut child = command
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
-    let stdout = child.stdout.take().expect("piped");
-    let stderr = child.stderr.take().expect("piped");
-    let filter = Mutex::new(Filter::new(kind, BufWriter::new(log), console));
-    std::thread::scope(|scope| {
-        scope.spawn(|| {
-            for raw in BufReader::new(stdout).lines().map_while(Result::ok) {
-                filter.lock().expect("no reader panics").stdout(&raw);
+impl Capture<'_> {
+    /// Runs `command`, its output through the filter into the log.
+    pub(crate) fn run(
+        self,
+        command: &mut Command,
+        console: &mut Console,
+    ) -> std::io::Result<Report> {
+        let Self {
+            kind,
+            log,
+            log_name,
+        } = self;
+        let mut child = command
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?;
+        let stdout = child.stdout.take().expect("piped");
+        let stderr = child.stderr.take().expect("piped");
+        let filter = Mutex::new(Filter::new(kind, BufWriter::new(log), console));
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                for raw in BufReader::new(stdout).lines().map_while(Result::ok) {
+                    filter.lock().expect("no reader panics").stdout(&raw);
+                }
+            });
+            for raw in BufReader::new(stderr).lines().map_while(Result::ok) {
+                filter.lock().expect("no reader panics").line(&raw);
             }
         });
-        for raw in BufReader::new(stderr).lines().map_while(Result::ok) {
-            filter.lock().expect("no reader panics").line(&raw);
-        }
-    });
-    let status = child.wait()?;
-    let mut report = filter
-        .into_inner()
-        .expect("no reader panics")
-        .finish(log_name);
-    report.code = status.code();
-    Ok(report)
+        let status = child.wait()?;
+        let mut report = filter
+            .into_inner()
+            .expect("no reader panics")
+            .finish(log_name);
+        report.code = status.code();
+        Ok(report)
+    }
 }
 
 /// Whether a line is noise a step leaves to its log: cargo's progress and tallies, nextest's
@@ -586,7 +582,7 @@ mod tests {
         let mut console = Console::new(Ci::No);
         let lines: Vec<String> = (0..300).map(|i| format!("line {i}")).collect();
         let lines: Vec<&str> = lines.iter().map(String::as_str).collect();
-        let (report, log, printed) = feed(Kind::Program, &mut console, &lines, &[]);
+        let (report, log, printed) = feed(Kind::Plain, &mut console, &lines, &[]);
         let printed: Vec<&str> = printed.lines().collect();
         // The head, the count of what it leaves out, the tail.
         assert_eq!(printed.len(), HEAD_LINES + 1 + TAIL_LINES);

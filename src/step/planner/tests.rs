@@ -18,7 +18,7 @@ fn lane_commands() {
         join(&ci.fmt()),
         "fmt -p core -p app -p harness -p check --check"
     );
-    let lints = ci.lints(&root.lanes.lint);
+    let lints = ci.lints(&root.config.lint);
     assert_eq!(lints.len(), 1);
     assert_eq!(lints[0].name, "lint");
     assert_eq!(
@@ -43,7 +43,7 @@ fn lane_commands() {
     assert!(join(&tests[0]).starts_with("nextest run --workspace --all-features --locked"));
     assert!(join(&tests[0]).ends_with("--success-output never name"));
     let mut cargo_test = Root::fixture();
-    cargo_test.lanes.test_runner = TestRunner::CargoTest;
+    cargo_test.config.test_runner = TestRunner::CargoTest;
     let libtest = keep(&cargo_test).tests(&["name".to_owned()], Runs::OnChange);
     assert_eq!(libtest[0].kind, Kind::CargoTest);
     assert_eq!(
@@ -64,15 +64,15 @@ fn lane_commands() {
 #[test]
 fn a_run_that_keeps_files_checks_the_format_and_locks_only_a_committed_lockfile() {
     let mut root = Root::fixture();
-    root.lanes.docs = true;
-    root.lanes.gate_benches = true;
-    root.lanes.cross_lint = vec!["x86_64-pc-windows-gnu".to_owned()];
-    root.lanes.commands = vec![command(
+    root.config.docs = true;
+    root.config.gate_benches = true;
+    root.config.cross_lint = vec!["x86_64-pc-windows-gnu".to_owned()];
+    root.config.commands = vec![command(
         "lan",
         Some("gate"),
         &serde_json::json!([{ "build": "build" }, { "cargo": "run" }]),
     )];
-    root.lanes.package = vec!["app".to_owned()];
+    root.config.package = vec!["app".to_owned()];
     let out = Path::new("/w/target/package");
     let steps = |root: &Root, files| {
         let planner = Planner::new(root, files);
@@ -167,14 +167,14 @@ fn a_project_command_s_steps() {
     );
     let exe = std::env::consts::EXE_SUFFIX;
     assert_eq!(
-        steps[1].program,
-        Program::Other(PathBuf::from(format!("/w/target/debug/app{exe}")))
+        steps[1].action,
+        Action::Program(PathBuf::from(format!("/w/target/debug/app{exe}")))
     );
     assert_eq!(steps[1].words(), ["/w/target/drive/lan", "out"]);
     // The arguments go to the one step that takes them.
     assert_eq!(
         (join(&steps[2]), steps[2].kind),
-        ("run -p app --locked".to_owned(), Kind::Program)
+        ("run -p app --locked".to_owned(), Kind::Plain)
     );
     assert!(
         steps[2]
@@ -186,7 +186,7 @@ fn a_project_command_s_steps() {
     assert!(tests.ends_with("--success-output never -E test(=index)"));
     assert_eq!(steps[3].kind, Kind::Nextest);
     // A bare name is a program on `PATH`.
-    assert_eq!(steps[4].program, Program::Other(PathBuf::from("objcopy")));
+    assert_eq!(steps[4].action, Action::Program(PathBuf::from("objcopy")));
     assert_eq!(ci.command(&lan, &[], Runs::Always)[0].runs, Runs::Always);
     let target = Path::new("/t");
     assert_eq!(
@@ -198,7 +198,7 @@ fn a_project_command_s_steps() {
 #[test]
 fn the_commands_that_join_test_and_gate_and_the_root_s_other_lanes() {
     let mut root = Root::fixture();
-    root.lanes.commands = vec![
+    root.config.commands = vec![
         command(
             "index",
             Some("test"),
@@ -211,8 +211,8 @@ fn the_commands_that_join_test_and_gate_and_the_root_s_other_lanes() {
         ),
         command("zero-hour", None, &serde_json::json!([{ "cargo": "run" }])),
     ];
-    root.lanes.gate_benches = true;
-    root.lanes.cross_lint = vec!["x86_64-pc-windows-gnu".to_owned()];
+    root.config.gate_benches = true;
+    root.config.cross_lint = vec!["x86_64-pc-windows-gnu".to_owned()];
     let names = |steps: Vec<Step>| -> Vec<String> { steps.into_iter().map(|s| s.name).collect() };
     let ci = keep(&root);
     // `test` writes the index before the tests, whole once an input changed.
@@ -250,8 +250,8 @@ fn the_commands_that_join_test_and_gate_and_the_root_s_other_lanes() {
             "--all-features"
         )
     );
-    root.lanes.bench = FlagSet::all_features();
-    root.lanes.test[0] = FlagSet {
+    root.config.bench = FlagSet::all_features();
+    root.config.test[0] = FlagSet {
         features: vec!["--features".to_owned(), "golden".to_owned()],
         targets: vec!["--lib".to_owned()],
         but: Vec::new(),
@@ -272,7 +272,7 @@ fn the_commands_that_join_test_and_gate_and_the_root_s_other_lanes() {
 #[test]
 fn package_builds_the_release_then_splits_each_binary() {
     let mut root = Root::fixture();
-    root.lanes.package = vec!["app".to_owned()];
+    root.config.package = vec!["app".to_owned()];
     let steps = keep(&root).package(Path::new("/w/target/package"));
     assert_eq!(
         join(&steps[0]),
@@ -299,8 +299,8 @@ fn package_builds_the_release_then_splits_each_binary() {
 fn every_runs_the_fixed_lanes_of_the_sweep() {
     let mut root = Root::fixture();
     let none = FlagSet::parse("--no-default-features", "lint", Targets::Refused).unwrap();
-    root.lanes.lint = vec![none.clone(), FlagSet::all_features()];
-    root.lanes.test.push(none);
+    root.config.lint = vec![none.clone(), FlagSet::all_features()];
+    root.config.test.push(none);
     let names = |root: &Root, sweep| -> Vec<String> {
         (keep(root).every(sweep).into_iter())
             .map(|s| s.name)
@@ -310,7 +310,7 @@ fn every_runs_the_fixed_lanes_of_the_sweep() {
     let gate = ["fmt", "lint.1", "lint.2", "ship", "tests.1", "tests.2"];
     assert_eq!(names(&root, Sweep::Gate), gate);
     assert_eq!(names(&root, Sweep::GateCi), gate);
-    root.lanes.docs = true;
+    root.config.docs = true;
     assert_eq!(names(&root, Sweep::Gate)[6..], ["doc", "doctests"]);
     assert_eq!(names(&root, Sweep::Check), ["fmt", "lint"]);
 

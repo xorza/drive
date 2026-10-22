@@ -10,11 +10,14 @@ checksum = "940b3a0ca603d1eade50a4846a2afffd5ef57a9feac2c0e2ec2e14f9ead76000"
 
 [[package]]
 name = "cargo-drive"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "clap",
+ "proc-macro2",
+ "quote",
  "serde",
  "serde_json",
+ "syn",
 ]
 
 [[package]]

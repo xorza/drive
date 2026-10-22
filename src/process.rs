@@ -37,8 +37,13 @@ pub(crate) fn is_drivers_own(name: &OsStr) -> bool {
     })
 }
 
-/// Stdout of a command run in `dir`; a failure carries its stderr.
+/// Stdout of a command run in `dir`, as text; a failure carries its stderr.
 pub(crate) fn stdout(command: &mut Command, dir: &Path) -> Result<String> {
+    stdout_bytes(command, dir).map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// Stdout of a command run in `dir`, as the command wrote it; a failure carries its stderr.
+pub(crate) fn stdout_bytes(command: &mut Command, dir: &Path) -> Result<Vec<u8>> {
     let program = command.get_program().to_string_lossy().into_owned();
     let out = command
         .current_dir(dir)
@@ -52,7 +57,7 @@ pub(crate) fn stdout(command: &mut Command, dir: &Path) -> Result<String> {
             stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
         });
     }
-    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    Ok(out.stdout)
 }
 
 fn file_stem(command: &Command) -> String {

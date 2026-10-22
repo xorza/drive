@@ -3,12 +3,12 @@
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
+use crate::config::TestRunner;
 use crate::flag_set::FlagSet;
-use crate::lanes::TestRunner;
 use crate::platform::{self, SplitBy};
-use crate::project_command::{CommandStep, Joins, ProjectCommand, StepWhat};
+use crate::project_command::{CommandAction, CommandStep, Joins, ProjectCommand};
 use crate::root::{Lockfile, Root};
-use crate::step::{Kind, Program, Runs, SharedPass, Step};
+use crate::step::{Action, Kind, Runs, SharedPass, Step};
 use crate::sweep::Sweep;
 
 /// Cargo's messages as JSON, each diagnostic short: the driver tells a lint from code that does
@@ -111,7 +111,7 @@ impl<'r> Planner<'r> {
     }
 
     pub(crate) fn doc(self) -> Step {
-        let set = &self.root.lanes.doc;
+        let set = &self.root.config.doc;
         let mut argv = vec![
             "doc",
             "--workspace",
@@ -131,7 +131,7 @@ impl<'r> Planner<'r> {
 
     /// One step per test lane, each with `extra`.
     pub(crate) fn tests(self, extra: &[String], runs: Runs) -> Vec<Step> {
-        let sets = &self.root.lanes.test;
+        let sets = &self.root.config.test;
         let lane = |(i, set): (usize, &FlagSet)| Step {
             runs,
             ..self.test_lane(&numbered("tests", i, sets.len()), set, extra)
@@ -142,12 +142,12 @@ impl<'r> Planner<'r> {
     /// The tests of `set`, with `extra`, the runner's arguments: nextest's, or the test binaries'
     /// under `cargo test`.
     fn test_lane(self, name: &str, set: &FlagSet, extra: &[String]) -> Step {
-        let (kind, mut argv) = match self.root.lanes.test_runner {
+        let (kind, mut argv) = match self.root.config.test_runner {
             TestRunner::Nextest => (Kind::Nextest, vec!["nextest", "run", "--workspace"]),
             TestRunner::CargoTest => (Kind::CargoTest, vec!["test", "--workspace"]),
         };
         argv.extend(set.args());
-        match self.root.lanes.test_runner {
+        match self.root.config.test_runner {
             TestRunner::Nextest => {
                 argv.extend(self.lock());
                 argv.extend(["--cargo-message-format", "json-diagnostic-short"]);
@@ -179,7 +179,7 @@ impl<'r> Planner<'r> {
         if !self.root.members.iter().any(|m| m.benches) {
             return None;
         }
-        let set = self.root.lanes.test[0].features_only();
+        let set = self.root.config.test[0].features_only();
         let mut argv = vec!["build", "--workspace"];
         argv.extend(EVERY_BENCH);
         argv.extend(set.args());
@@ -196,7 +196,7 @@ impl<'r> Planner<'r> {
         if !self.root.members.iter().any(|m| m.doctest) {
             return None;
         }
-        let set = self.root.lanes.test[0].features_only();
+        let set = self.root.config.test[0].features_only();
         let mut argv = vec!["test", "--workspace", "--doc"];
         argv.extend(set.args());
         argv.extend(self.lock());
@@ -224,15 +224,15 @@ impl<'r> Planner<'r> {
             argv.extend(["-p", name]);
         }
         argv.extend(EVERY_BENCH);
-        argv.extend(self.root.lanes.bench.args());
+        argv.extend(self.root.config.bench.args());
         if !extra.is_empty() {
             argv.push("--");
         }
         argv.extend(extra.iter().map(String::as_str));
-        let step = Step::new(self.root, "bench", Kind::Program, argv);
+        let step = Step::new(self.root, "bench", Kind::Plain, argv);
         Some(Step {
             runs: Runs::Always,
-            label: self.root.lanes.bench.label(),
+            label: self.root.config.bench.label(),
             ..step
         })
     }
@@ -240,7 +240,7 @@ impl<'r> Planner<'r> {
     /// The lint of every target with every feature for each of `lanes.cross_lint`'s targets, as
     /// `check`'s lint is for the host's.
     pub(crate) fn cross_lints(self) -> Vec<Step> {
-        let targets = &self.root.lanes.cross_lint;
+        let targets = &self.root.config.cross_lint;
         let lane = |(i, target): (usize, &String)| {
             let name = numbered("cross", i, targets.len());
             Step {
@@ -264,24 +264,24 @@ impl<'r> Planner<'r> {
         let lane = |(i, step): (usize, &CommandStep)| {
             let name = numbered(&command.name, i, count);
             let given = if step.takes_args { args } else { &[] };
-            let mut built = match &step.what {
-                StepWhat::Build(cargo) => {
+            let mut built = match &step.action {
+                CommandAction::Build(cargo) => {
                     let mut argv = strs(cargo);
                     argv.extend(self.lock());
                     argv.push(JSON);
                     argv.extend(given.iter().map(String::as_str));
                     Step::new(root, &name, Kind::Check, argv)
                 }
-                StepWhat::Cargo(cargo) => {
+                CommandAction::Cargo(cargo) => {
                     let mut argv = strs(cargo);
                     argv.extend(self.lock());
                     if !given.is_empty() {
                         argv.push("--");
                     }
                     argv.extend(given.iter().map(String::as_str));
-                    Step::new(root, &name, Kind::Program, argv)
+                    Step::new(root, &name, Kind::Plain, argv)
                 }
-                StepWhat::Program(program) => {
+                CommandAction::Program(program) => {
                     let (path, rest) = program.split_first().expect("a program step names one");
                     let path = PathBuf::from(placed(path, &root.target_dir));
                     // A path with a folder in it is the project's; a bare name, one on `PATH`.
@@ -295,13 +295,13 @@ impl<'r> Planner<'r> {
                         .collect();
                     argv.extend(given.iter().map(OsString::from));
                     Step {
-                        program: Program::Other(path),
+                        action: Action::Program(path),
                         argv,
-                        ..Step::new(root, &name, Kind::Program, Vec::new())
+                        ..Step::new(root, &name, Kind::Plain, Vec::new())
                     }
                 }
-                StepWhat::Tests(filter) => {
-                    let mut lane = self.test_lane(&name, &root.lanes.test[0], given);
+                CommandAction::Tests(filter) => {
+                    let mut lane = self.test_lane(&name, &root.config.test[0], given);
                     lane.argv
                         .extend([OsString::from("-E"), OsString::from(filter)]);
                     Step {
@@ -339,7 +339,7 @@ impl<'r> Planner<'r> {
     /// The steps of every command of the root that joins `joins`, each run whole once an input
     /// changed: no change narrows a project's own filter or program.
     fn joined(self, joins: Joins) -> Vec<Step> {
-        let commands = self.root.lanes.commands.iter();
+        let commands = self.root.config.commands.iter();
         let joining = commands.filter(|command| command.joins == Some(joins));
         joining
             .flat_map(|command| self.command(command, &[], Runs::OnInput))
@@ -360,7 +360,7 @@ impl<'r> Planner<'r> {
         let mut argv = vec!["build", "--release"];
         argv.extend(self.lock());
         argv.push(JSON);
-        for name in &root.lanes.package {
+        for name in &root.config.package {
             argv.extend(["--bin", name.as_str()]);
         }
         let mut build = Step::new(root, "release", Kind::Check, argv);
@@ -372,23 +372,33 @@ impl<'r> Planner<'r> {
         );
         let release = root.target_dir.join("release");
         let mut steps = vec![build];
-        for name in &root.lanes.package {
+        for name in &root.config.package {
             let built = release.join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
             for split in platform::split_debug(name, &built, out) {
                 let step_name = format!("{} {name}", split.makes);
-                let (program, argv) = match split.by {
-                    SplitBy::Tool { program, args } => (Program::Other(program.into()), args),
-                    SplitBy::Copy { from, to } => (Program::Copy { from, to }, Vec::new()),
+                let (action, argv) = match split.by {
+                    SplitBy::Tool { program, args } => (Action::Program(program.into()), args),
+                    SplitBy::Copy { from, to } => (Action::Copy { from, to }, Vec::new()),
                 };
                 steps.push(Step {
-                    program,
+                    action,
                     argv,
                     runs: Runs::Always,
-                    ..Step::new(root, &step_name, Kind::Program, Vec::new())
+                    ..Step::new(root, &step_name, Kind::Plain, Vec::new())
                 });
             }
         }
         steps
+    }
+
+    /// The vocabulary of every root's repository, written to `out`, which the driver lists
+    /// itself.
+    pub(crate) fn vocabulary(self, out: PathBuf) -> Step {
+        Step {
+            action: Action::Vocabulary { out },
+            runs: Runs::Always,
+            ..Step::new(self.root, "vocabulary", Kind::Plain, Vec::new())
+        }
     }
 
     /// The steps of `sweep`, the lints first, as they answer in seconds, and the docs last. A
@@ -400,17 +410,17 @@ impl<'r> Planner<'r> {
         match sweep {
             Sweep::Check => steps.extend(self.lints(&[FlagSet::all_features()])),
             Sweep::Gate | Sweep::GateCi => {
-                steps.extend(self.lints(&root.lanes.lint));
+                steps.extend(self.lints(&root.config.lint));
                 steps.push(self.ship());
                 if sweep == Sweep::Gate {
                     steps.extend(self.cross_lints());
                 }
                 steps.extend(self.tests(&[], Runs::OnChange));
                 steps.extend(self.joined(Joins::Gate));
-                if root.lanes.gate_benches {
+                if root.config.gate_benches {
                     steps.extend(self.gate_benches());
                 }
-                if root.lanes.docs {
+                if root.config.docs {
                     steps.push(self.doc());
                     steps.extend(self.doctests(Runs::OnChange));
                 }

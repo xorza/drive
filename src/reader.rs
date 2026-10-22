@@ -81,7 +81,7 @@ fn normal(path: &Path) -> PathBuf {
 pub(crate) mod internals {
     use std::path::PathBuf;
 
-    use crate::reads::Reader;
+    use crate::reader::Reader;
 
     impl Reader {
         /// A reader of `paths`, absolute and normal, with no look at the disk.

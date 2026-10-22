@@ -1,12 +1,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
+use crate::config::{Config, Features};
 use crate::error::{Error, Result};
-use crate::git::Repo;
-use crate::lanes::{Features, Lanes};
 use crate::member::Member;
 use crate::metadata::Metadata;
-use crate::tool;
+use crate::process;
+use crate::repo::Repo;
 
 /// A file at a root's top that a tool reads, whose change can alter every member's build: an
 /// input even where `.gitignore` leaves it out.
@@ -54,7 +54,7 @@ impl Lockfile {
 pub(crate) struct Root {
     pub(crate) dir: PathBuf,
     /// Its folder relative to the top root's, empty for the top root: the prefix of its steps.
-    pub(crate) label: String,
+    pub(crate) prefix: String,
     pub(crate) members: Vec<Member>,
     /// The members that depend on each member, by a dependency of any kind.
     dependents: BTreeMap<String, BTreeSet<String>>,
@@ -62,7 +62,7 @@ pub(crate) struct Root {
     pub(crate) unifies_internals: Vec<String>,
     pub(crate) target_dir: PathBuf,
     pub(crate) lockfile: Lockfile,
-    pub(crate) lanes: Lanes,
+    pub(crate) config: Config,
     pub(crate) repo: Option<Repo>,
 }
 
@@ -75,11 +75,11 @@ pub(crate) enum Reach {
 }
 
 impl Root {
-    /// The workspace that holds `dir`, its label empty.
+    /// The workspace that holds `dir`, its prefix empty.
     pub(crate) fn load(dir: &Path) -> Result<Self> {
-        let mut cargo = tool::cargo();
+        let mut cargo = process::cargo();
         cargo.args(["metadata", "--format-version", "1", "--no-deps"]);
-        let json = tool::stdout(&mut cargo, dir)?;
+        let json = process::stdout(&mut cargo, dir)?;
         let meta: Metadata = serde_json::from_str(&json).map_err(|source| Error::Metadata {
             dir: dir.to_owned(),
             source,
@@ -87,7 +87,7 @@ impl Root {
         Self::from_metadata(meta, String::new())
     }
 
-    fn from_metadata(meta: Metadata, label: String) -> Result<Self> {
+    fn from_metadata(meta: Metadata, prefix: String) -> Result<Self> {
         let packages: Vec<_> = meta
             .packages
             .iter()
@@ -133,7 +133,7 @@ impl Root {
         let drive = |m: Option<&serde_json::Value>| m.and_then(|m| m.get("drive")).cloned();
         let manifest = meta.workspace_root.join("Cargo.toml");
         let members: Vec<Member> = packages.iter().map(|p| Member::new(p, &names)).collect();
-        let lanes = Lanes::from_tables(
+        let config = Config::from_tables(
             drive(meta.metadata.as_ref()),
             drive(root_package.and_then(|p| p.metadata.as_ref())),
             &features,
@@ -149,18 +149,18 @@ impl Root {
             unifies_internals: closure(unifying, &normal_dependents).into_iter().collect(),
             dependents,
             target_dir: meta.target_directory,
-            lanes,
+            config,
             dir: meta.workspace_root,
-            label,
+            prefix,
         })
     }
 
     /// The step name with this root's prefix.
     pub(crate) fn step_name(&self, name: &str) -> String {
-        if self.label.is_empty() {
+        if self.prefix.is_empty() {
             name.to_owned()
         } else {
-            format!("{}/{name}", self.label)
+            format!("{}/{name}", self.prefix)
         }
     }
 
@@ -173,7 +173,7 @@ impl Root {
         let mut readers = BTreeSet::new();
         let mut input = false;
         for path in paths {
-            for reader in &self.lanes.reads {
+            for reader in &self.config.reads {
                 if reader.reads(path) {
                     input = true;
                     readers.insert(reader.member.clone());
@@ -342,7 +342,7 @@ pub(crate) mod internals {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::reads::Reader;
+    use crate::reader::Reader;
 
     fn reach(root: &Root, paths: &[&str], outside: &[&Root]) -> Option<Reach> {
         let paths: Vec<PathBuf> = paths.iter().map(PathBuf::from).collect();
@@ -361,13 +361,13 @@ mod tests {
         std::fs::write(dir.join("Cargo.lock"), "").unwrap();
         assert_eq!(Lockfile::of(&dir, None), Lockfile::Committed);
         // In git, the same file untracked, as `.gitignore` leaves it, is none committed.
-        let init = tool::command("git")
+        let init = process::command("git")
             .args(["init", "-q"])
             .current_dir(&dir)
             .status();
         assert!(init.unwrap().success());
         let repo = Repo::find(&dir).unwrap();
-        assert_eq!(Lockfile::of(&repo.top, Some(&repo)), Lockfile::Free);
+        assert_eq!(Lockfile::of(&repo.dir, Some(&repo)), Lockfile::Free);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -452,7 +452,7 @@ mod tests {
     fn a_reader_s_files_reach_its_tests_alone() {
         let mut root = Root::fixture();
         // `check` reads the documents beside the root, and `core` every file of the root.
-        root.lanes.reads = vec![
+        root.config.reads = vec![
             Reader::fixture("check", &["/docs"]),
             Reader::fixture("core", &["/w"]),
         ];

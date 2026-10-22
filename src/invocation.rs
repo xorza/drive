@@ -1,9 +1,9 @@
-use crate::cli::Task;
 use crate::error::{Error, Result};
 use crate::project::Project;
 use crate::runner::{OnFail, Plan, Reuse};
 use crate::step::Runs;
 use crate::step::planner::{Files, Planner};
+use crate::task::Task;
 
 /// What a task runs: the steps of each root, whether they reuse passes, and whether a failure
 /// ends them.
@@ -40,7 +40,7 @@ impl<'p> Invocation<'p> {
                 // nextest's arguments select no doc test; a whole run keeps its pass for `gate`,
                 // with the doc tests where it runs them.
                 let reuse = if args.is_empty() {
-                    if root.lanes.docs {
+                    if root.config.docs {
                         steps.extend(planner.doctests(Runs::Always));
                     }
                     Reuse::Passes
@@ -51,11 +51,16 @@ impl<'p> Invocation<'p> {
             }
             Task::Run { name, args } => {
                 let command = root
-                    .lanes
+                    .config
                     .command(name)
                     .ok_or_else(|| Error::UnknownCommand {
                         name: name.clone(),
-                        known: root.lanes.commands.iter().map(|c| c.name.clone()).collect(),
+                        known: root
+                            .config
+                            .commands
+                            .iter()
+                            .map(|c| c.name.clone())
+                            .collect(),
                     })?;
                 if !args.is_empty() && !command.takes_args() {
                     return Err(Error::ArgsRefused {
@@ -67,7 +72,7 @@ impl<'p> Invocation<'p> {
                 top(steps, Reuse::Passes, OnFail::Stop)
             }
             Task::Package => {
-                if root.lanes.package.is_empty() {
+                if root.config.package.is_empty() {
                     return Err(Error::NothingToPackage {
                         dir: root.dir.clone(),
                     });
@@ -78,6 +83,11 @@ impl<'p> Invocation<'p> {
                     source,
                 })?;
                 top(planner.package(&out), Reuse::Never, OnFail::Stop)
+            }
+            Task::Vocabulary(out) => {
+                let out = (out.clone())
+                    .unwrap_or_else(|| root.target_dir.join("drive").join("vocabulary.txt"));
+                top(vec![planner.vocabulary(out)], Reuse::Never, OnFail::Stop)
             }
             Task::Bench(args) => {
                 let step = planner.bench(args).ok_or_else(|| Error::NoBenches {

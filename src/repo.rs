@@ -1,15 +1,15 @@
-//! The git trees a step's passes are keyed on.
+//! A root's git repository: the trees a step's passes are keyed on, and the files it lists.
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
-use crate::tool;
+use crate::process;
 
-/// A repository: its top folder and its index.
+/// A repository: its top folder, as git names it, and its index.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Repo {
-    pub(crate) top: PathBuf,
+    pub(crate) dir: PathBuf,
     index: PathBuf,
 }
 
@@ -31,7 +31,7 @@ impl Repo {
         let mut lines = paths.lines();
         let (top, index) = (lines.next()?, lines.next()?);
         Some(Self {
-            top: PathBuf::from(top),
+            dir: PathBuf::from(top),
             index: PathBuf::from(index),
         })
     }
@@ -63,7 +63,7 @@ impl Repo {
     /// The tree of the working files and of `forced`, staged in the index `scratch`.
     fn write_tree(&self, scratch: &Path, forced: &[PathBuf]) -> Option<String> {
         let env = [("GIT_INDEX_FILE", scratch.as_os_str())];
-        git(&self.top, &["add", "--all", "--", ":/"], &env)?;
+        git(&self.dir, &["add", "--all", "--", ":/"], &env)?;
         let existing: Vec<&OsStr> = (forced.iter())
             .filter(|f| f.is_file())
             .map(|f| f.as_os_str())
@@ -71,9 +71,9 @@ impl Repo {
         if !existing.is_empty() {
             let flags = ["add", "--force", "--"].map(OsStr::new);
             let args: Vec<&OsStr> = flags.into_iter().chain(existing).collect();
-            git(&self.top, &args, &env)?;
+            git(&self.dir, &args, &env)?;
         }
-        git(&self.top, &["write-tree"], &env)
+        git(&self.dir, &["write-tree"], &env)
     }
 
     /// Whether the index tracks the file `path`; `None` when git cannot tell, as for a path
@@ -81,14 +81,21 @@ impl Repo {
     pub(crate) fn tracks(&self, path: &Path) -> Option<bool> {
         let args = ["ls-files", "-z", "--"].map(OsStr::new);
         let args = args.into_iter().chain([path.as_os_str()]);
-        git(&self.top, &args.collect::<Vec<_>>(), &[]).map(|listed| !listed.is_empty())
+        git(&self.dir, &args.collect::<Vec<_>>(), &[]).map(|listed| !listed.is_empty())
+    }
+
+    /// What `git ls-files -z` prints with `options`, as git writes the paths.
+    pub(crate) fn ls_files(&self, options: &[&str]) -> Result<Vec<u8>> {
+        let mut git = process::command("git");
+        git.args(["ls-files", "-z"]).args(options);
+        process::stdout_bytes(&mut git, &self.dir)
     }
 
     /// The files that differ between two trees; `None` when git cannot compare them, as when
     /// one is gone.
     pub(crate) fn changed(&self, from: &str, to: &str) -> Option<Vec<PathBuf>> {
         let names = git(
-            &self.top,
+            &self.dir,
             &["diff", "--name-only", "--no-renames", "-z", from, to],
             &[],
         )?;
@@ -96,7 +103,7 @@ impl Repo {
             names
                 .split('\0')
                 .filter(|n| !n.is_empty())
-                .map(|n| self.top.join(n))
+                .map(|n| self.dir.join(n))
                 .collect(),
         )
     }
@@ -104,7 +111,7 @@ impl Repo {
 
 /// A git command's stdout; `None` when it fails.
 fn git(dir: &Path, args: &[impl AsRef<OsStr>], env: &[(&str, &OsStr)]) -> Option<String> {
-    let out = tool::command("git")
+    let out = process::command("git")
         .args(args)
         .envs(env.iter().copied())
         .current_dir(dir)
@@ -119,14 +126,14 @@ fn git(dir: &Path, args: &[impl AsRef<OsStr>], env: &[(&str, &OsStr)]) -> Option
 pub(crate) mod internals {
     use std::path::Path;
 
-    use crate::git::Repo;
+    use crate::repo::Repo;
 
     impl Repo {
-        /// A repository at `top`, its index in `.git`.
-        pub(crate) fn fixture(top: &Path) -> Self {
+        /// A repository at `dir`, its index in `.git`.
+        pub(crate) fn fixture(dir: &Path) -> Self {
             Self {
-                top: top.to_owned(),
-                index: top.join(".git/index"),
+                dir: dir.to_owned(),
+                index: dir.join(".git/index"),
             }
         }
     }
@@ -150,7 +157,7 @@ mod tests {
                 .unwrap()
                 .trim(),
         );
-        assert_eq!((&repo.top, &repo.index), (&top, &top.join(".git/index")));
+        assert_eq!((&repo.dir, &repo.index), (&top, &top.join(".git/index")));
         let scratch = dir.join("scratch-index");
 
         // Nothing is staged, so the repository has no index yet; new files count all the same.
@@ -186,6 +193,6 @@ mod tests {
                 .is_none()
         );
         std::fs::remove_dir_all(&dir).unwrap();
-        assert_eq!(changed, [repo.top.join("a.rs"), repo.top.join("c.rs")]);
+        assert_eq!(changed, [repo.dir.join("a.rs"), repo.dir.join("c.rs")]);
     }
 }

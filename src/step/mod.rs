@@ -21,8 +21,9 @@ pub(crate) enum Kind {
     CargoTest,
     /// `cargo test --doc`: a build, then the doc tests.
     Doctests,
-    /// A program whose output is its own: a bench, a project's command, a packaging move.
-    Program,
+    /// A step whose output the driver passes on as it is: a bench, a project's command, a
+    /// packaging move, the vocabulary.
+    Plain,
 }
 
 impl Kind {
@@ -53,13 +54,15 @@ pub(crate) enum Runs {
 
 /// What a step runs.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum Program {
+pub(crate) enum Action {
     /// Cargo, with the step's arguments.
     Cargo,
     /// Another program, by its path or by its name on `PATH`, with the step's arguments.
-    Other(PathBuf),
+    Program(PathBuf),
     /// No process: a copy of the file or the folder `from`, in place of what `to` holds.
     Copy { from: PathBuf, to: PathBuf },
+    /// No process: the vocabulary of every root's repository, written to `out`.
+    Vocabulary { out: PathBuf },
 }
 
 /// One command on one root, cargo's or another program's.
@@ -67,7 +70,7 @@ pub(crate) enum Program {
 pub(crate) struct Step {
     pub(crate) name: String,
     pub(crate) kind: Kind,
-    pub(crate) program: Program,
+    pub(crate) action: Action,
     /// The program's arguments.
     pub(crate) argv: Vec<OsString>,
     /// Variables set, or removed for `None`.
@@ -94,7 +97,7 @@ impl Step {
         Self {
             name: root.step_name(name),
             kind,
-            program: Program::Cargo,
+            action: Action::Cargo,
             argv: argv.into_iter().map(OsString::from).collect(),
             // Rustdoc's flags are in the doc tests' fingerprint, and only the doc lane sets them.
             env: vec![("RUSTDOCFLAGS".to_owned(), None)],
@@ -131,15 +134,16 @@ impl Step {
         }
     }
 
-    /// The program it runs, as an error names it.
-    pub(crate) fn program_name(&self) -> String {
-        match &self.program {
-            Program::Cargo => {
+    /// What it runs, as an error names it.
+    pub(crate) fn action_name(&self) -> String {
+        match &self.action {
+            Action::Cargo => {
                 let first = self.argv.first().map(|arg| arg.to_string_lossy());
                 format!("cargo {}", first.unwrap_or_default())
             }
-            Program::Other(path) => path.display().to_string(),
-            Program::Copy { from, .. } => format!("a copy of {}", from.display()),
+            Action::Program(path) => path.display().to_string(),
+            Action::Copy { from, .. } => format!("a copy of {}", from.display()),
+            Action::Vocabulary { .. } => "the vocabulary".to_owned(),
         }
     }
 
@@ -151,7 +155,7 @@ impl Step {
         let tested: fn(&Member) -> bool = match self.kind {
             Kind::Nextest | Kind::CargoTest => |_| true,
             Kind::Doctests => |member| member.doctest,
-            Kind::Format | Kind::Check | Kind::Program => return Some(self.clone()),
+            Kind::Format | Kind::Check | Kind::Plain => return Some(self.clone()),
         };
         let tests: Vec<&str> = (root.members.iter())
             .filter(|m| tested(m))
@@ -201,8 +205,8 @@ impl Step {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::TestRunner;
     use crate::flag_set::FlagSet;
-    use crate::lanes::TestRunner;
     use crate::step::planner::{Files, Planner};
 
     impl Step {
@@ -292,7 +296,7 @@ mod tests {
             Some(doctests)
         );
         let mut cargo_test = Root::fixture();
-        cargo_test.lanes.test_runner = TestRunner::CargoTest;
+        cargo_test.config.test_runner = TestRunner::CargoTest;
         let libtest = Planner::new(&cargo_test, Files::Write)
             .tests(&[], Runs::OnChange)
             .remove(0);
@@ -309,7 +313,7 @@ mod tests {
     #[test]
     fn a_log_is_named_after_the_step_with_its_root() {
         let mut root = Root::fixture();
-        root.label = "palantir".to_owned();
+        root.prefix = "palantir".to_owned();
         let fmt = Planner::new(&root, Files::Write).fmt();
         assert_eq!(fmt.name, "palantir/fmt");
         assert_eq!(fmt.log_name(), "palantir-fmt.log");

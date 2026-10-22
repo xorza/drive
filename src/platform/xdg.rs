@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use crate::platform::{Split, SplitBy, Var};
 
-pub(super) fn log_dir(var: Var<'_>) -> Option<PathBuf> {
+pub(super) fn journal_dir(var: Var<'_>) -> Option<PathBuf> {
     // The specification ignores a relative path in the variable.
     let state = var("XDG_STATE_HOME")
         .map(PathBuf::from)
@@ -55,7 +55,7 @@ mod tests {
     use super::*;
 
     fn dir(vars: &[(&str, &str)]) -> Option<PathBuf> {
-        log_dir(&|name| {
+        journal_dir(&|name| {
             vars.iter()
                 .find(|(n, _)| *n == name)
                 .map(|(_, v)| OsString::from(v))

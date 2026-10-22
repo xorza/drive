@@ -29,9 +29,9 @@ impl Project {
                 }
                 let mut found = Root::load(&dir)?;
                 if roots.iter().all(|r| r.dir != found.dir) {
-                    let label = (found.dir.strip_prefix(&top))
+                    let prefix = (found.dir.strip_prefix(&top))
                         .unwrap_or_else(|_| Path::new(found.dir.file_name().unwrap_or_default()));
-                    found.label = label
+                    found.prefix = prefix
                         .components()
                         .map(|c| c.as_os_str().to_string_lossy())
                         .collect::<Vec<_>>()
@@ -52,11 +52,11 @@ impl Project {
         &self.roots[0]
     }
 
-    /// The files a tool reads at the top of each root in the repository at `top`, whether or not
-    /// they exist. Every root of the repository shares its tree, so each names them all.
-    pub(crate) fn tool_files(&self, top: &Path) -> Vec<PathBuf> {
+    /// The files a tool reads at the top of each root in the repository at `repo_dir`, whether or
+    /// not they exist. Every root of the repository shares its tree, so each names them all.
+    pub(crate) fn tool_files(&self, repo_dir: &Path) -> Vec<PathBuf> {
         (self.roots.iter())
-            .filter(|root| root.repo.as_ref().is_some_and(|repo| repo.top == top))
+            .filter(|root| root.repo.as_ref().is_some_and(|repo| repo.dir == repo_dir))
             .flat_map(Root::tool_files)
             .collect()
     }
@@ -82,7 +82,7 @@ impl Project {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::git::Repo;
+    use crate::repo::Repo;
 
     #[test]
     fn tool_files_name_every_root_of_the_repository_and_no_other() {

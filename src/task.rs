@@ -1,6 +1,8 @@
-use clap::{Arg, ArgAction, ArgMatches, Command};
+use std::path::PathBuf;
 
-use crate::output::Ci;
+use clap::{Arg, ArgAction, ArgMatches, Command, value_parser};
+
+use crate::ci::Ci;
 use crate::step::planner::Files;
 use crate::sweep::Sweep;
 
@@ -17,6 +19,8 @@ pub(crate) enum Task {
     Run { name: String, args: Vec<String> },
     /// The release build of the binaries the root ships, stripped, with their debug info beside.
     Package,
+    /// The vocabulary of every root's repository, to the file given or to the driver's own.
+    Vocabulary(Option<PathBuf>),
 }
 
 impl Task {
@@ -31,6 +35,7 @@ impl Task {
             Self::Bench(_) => "bench",
             Self::Run { .. } => "run",
             Self::Package => "package",
+            Self::Vocabulary(_) => "vocabulary",
         }
     }
 
@@ -51,12 +56,12 @@ impl Task {
     }
 
     /// Whether it may change the files it checks, run in `ci`: a sweep as it says, a release
-    /// build never, any other command only outside CI. A release and a run in CI stand for the
-    /// commit, so they build its lockfile.
+    /// build and the vocabulary never, any other command only outside CI. A release and a run in
+    /// CI stand for the commit, so they build its lockfile.
     pub(crate) const fn files(&self, ci: Ci) -> Files {
         match (self, ci) {
             (Self::Sweep(sweep), _) => sweep.files(),
-            (Self::Package, _) | (_, Ci::GitHub) => Files::Keep,
+            (Self::Package | Self::Vocabulary(_), _) | (_, Ci::GitHub) => Files::Keep,
             (Self::Test(_) | Self::Bench(_) | Self::Run { .. }, Ci::No) => Files::Write,
         }
     }
@@ -66,6 +71,9 @@ impl Task {
             Self::Test(args) | Self::Bench(args) => args.clone(),
             Self::Run { name, args } => std::iter::once(name).chain(args).cloned().collect(),
             Self::Sweep(Sweep::GateCi) => vec!["--ci".to_owned()],
+            Self::Vocabulary(out) => (out.iter())
+                .map(|out| out.to_string_lossy().into_owned())
+                .collect(),
             Self::Sweep(Sweep::Check | Sweep::Gate) | Self::Package => Vec::new(),
         }
     }
@@ -96,6 +104,7 @@ impl Task {
                 args: args(),
             },
             "package" => Self::Package,
+            "vocabulary" => Self::Vocabulary(sub.get_one::<PathBuf>("out").cloned()),
             _ => unreachable!("clap knows only these subcommands"),
         }
     }
@@ -157,7 +166,23 @@ fn command() -> Command {
         .subcommand(Command::new("package").about(
             "The release build of the binaries `package` names, each stripped in \
              target/package with its debug info beside it",
-        ));
+        ))
+        .subcommand(
+            Command::new("vocabulary")
+                .about(
+                    "The layout of each root's repository, the names its Rust files declare and \
+                     the count of each word, in one file whose order is fixed, for a review of \
+                     the names",
+                )
+                .arg(
+                    Arg::new("out")
+                        .value_name("OUT")
+                        .value_parser(value_parser!(PathBuf))
+                        .help(
+                            "The file it goes to; target/drive/vocabulary.txt when none is given",
+                        ),
+                ),
+        );
     Command::new("cargo")
         .bin_name("cargo")
         .subcommand_required(true)
@@ -235,16 +260,31 @@ mod tests {
         );
         let package = parse(&["cargo-drive", "drive", "package"]);
         assert_eq!((package.name(), package.args()), ("package", Vec::new()));
+        let vocabulary = parse(&["cargo-drive", "drive", "vocabulary"]);
+        assert_eq!(vocabulary, Task::Vocabulary(None));
+        assert_eq!(
+            (
+                vocabulary.name(),
+                vocabulary.args(),
+                vocabulary.output_file()
+            ),
+            ("vocabulary", Vec::new(), "last-vocabulary.txt".to_owned())
+        );
+        let to = parse(&["cargo-drive", "drive", "vocabulary", "out/words.txt"]);
+        assert_eq!(to, Task::Vocabulary(Some(PathBuf::from("out/words.txt"))));
+        assert_eq!(to.args(), ["out/words.txt"]);
         let files = |task: &Task| [Ci::No, Ci::GitHub].map(|ci| task.files(ci));
         assert_eq!(files(&check), [Files::Write; 2]);
         assert_eq!(files(&ci), [Files::Keep; 2]);
         assert_eq!(files(&package), [Files::Keep; 2]);
+        assert_eq!(files(&vocabulary), [Files::Keep; 2]);
         for task in [&bench, &lan, &Task::Test(Vec::new())] {
             assert_eq!(files(task), [Files::Write, Files::Keep]);
         }
         let fails = |argv: &[&str]| command().try_get_matches_from(argv).is_err();
         assert!(fails(&["cargo-drive", "drive", "run"]));
         assert!(fails(&["cargo-drive", "drive", "package", "x"]));
+        assert!(fails(&["cargo-drive", "drive", "vocabulary", "a", "b"]));
         assert!(fails(&["cargo-drive", "drive"]));
         assert!(fails(&["cargo-drive", "drive", "check", "-p", "x"]));
         assert!(fails(&["cargo-drive", "drive", "check", "--ci"]));

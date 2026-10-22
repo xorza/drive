@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use crate::tool;
+use crate::process;
 use crate::version;
 
 /// What changes a step's result from outside its working files, each read once a run, when a step
@@ -22,15 +22,15 @@ impl Tools {
     }
 
     pub(crate) fn rustc(&mut self, dir: &Path) -> &str {
-        self.rustc
-            .entry(dir.to_owned())
-            .or_insert_with(|| tool::first_line(tool::command("rustc").arg("-V").current_dir(dir)))
+        self.rustc.entry(dir.to_owned()).or_insert_with(|| {
+            process::first_line(process::command("rustc").arg("-V").current_dir(dir))
+        })
     }
 
     pub(crate) fn nextest(&mut self, dir: &Path) -> &str {
         self.nextest.get_or_insert_with(|| {
-            tool::first_line(
-                tool::cargo()
+            process::first_line(
+                process::cargo()
                     .args(["nextest", "--version"])
                     .current_dir(dir),
             )
@@ -43,7 +43,7 @@ impl Tools {
     pub(crate) fn env(&mut self) -> &BTreeMap<String, Option<String>> {
         self.env.get_or_insert_with(|| {
             std::env::vars_os()
-                .filter(|(name, _)| !tool::is_drivers_own(name))
+                .filter(|(name, _)| !process::is_drivers_own(name))
                 .filter_map(|(name, value)| {
                     let name = name.into_string().ok()?;
                     let value = value.as_encoded_bytes().escape_ascii().to_string();

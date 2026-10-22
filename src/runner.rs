@@ -1,19 +1,22 @@
 use std::collections::BTreeMap;
 use std::fs::File;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
+use crate::capture::Capture;
+use crate::ci::Ci;
+use crate::config::TestRunner;
 use crate::context::Context;
 use crate::error::{Error, Result};
-use crate::git::Repo;
-use crate::lanes::TestRunner;
 use crate::outcome::{Outcome, Status};
-use crate::output::{self, Capture, Ci};
 use crate::passes::{PassKey, Passes, Snapshot};
+use crate::process;
 use crate::project::Project;
+use crate::repo::Repo;
 use crate::root::{Reach, Root};
-use crate::step::{Kind, Program, Runs, Step};
-use crate::tool;
+use crate::step::{Action, Kind, Runs, Step};
+use crate::vocabulary::Vocabulary;
 
 /// Whether a command reuses and keeps the passes of its steps.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -240,15 +243,31 @@ impl<'p> Runner<'p> {
         let aside = log.with_file_name(format!("{}-{}.tmp", step.log_name(), std::process::id()));
         let io = |path: PathBuf| move |source| Error::Io { path, source };
         let file = File::create(&aside).map_err(io(aside.clone()))?;
-        let mut command = match &step.program {
-            Program::Cargo => tool::cargo(),
-            Program::Other(path) => tool::command(path),
-            Program::Copy { from, to } => {
+        let mut command = match &step.action {
+            Action::Cargo => process::cargo(),
+            Action::Program(path) => process::command(path),
+            Action::Copy { from, to } => {
                 let started = Instant::now();
                 let copied = copy(from, to);
                 drop(file);
                 std::fs::rename(&aside, &log).map_err(io(log.clone()))?;
                 return Ok(Outcome::copied(step, copied, started.elapsed(), log));
+            }
+            Action::Vocabulary { out } => {
+                let started = Instant::now();
+                let vocabulary = Vocabulary::of(self.project)?;
+                vocabulary.write(out)?;
+                let unparsed: Vec<String> = (vocabulary.unparsed().iter())
+                    .map(ToString::to_string)
+                    .collect();
+                let mut file = file;
+                for line in &unparsed {
+                    writeln!(file, "{line}").map_err(io(aside.clone()))?;
+                }
+                drop(file);
+                std::fs::rename(&aside, &log).map_err(io(log.clone()))?;
+                let out = out.strip_prefix(&self.cx.here).unwrap_or(out);
+                return Ok(Outcome::listed(step, unparsed, out, started.elapsed(), log));
             }
         };
         command.args(&step.argv).current_dir(&root.dir);
@@ -274,12 +293,11 @@ impl<'p> Runner<'p> {
             log: file,
             log_name: &log_name,
         };
-        let report =
-            output::run(&mut command, capture, &mut self.cx.console).map_err(|source| {
-                Error::Spawn {
-                    program: step.program_name(),
-                    source,
-                }
+        let report = capture
+            .run(&mut command, &mut self.cx.console)
+            .map_err(|source| Error::Spawn {
+                program: step.action_name(),
+                source,
             })?;
         let elapsed = started.elapsed();
         std::fs::rename(&aside, &log).map_err(io(log.clone()))?;
@@ -322,17 +340,17 @@ impl<'p> Runner<'p> {
             let Some(repo) = &each.repo else {
                 return Ok(None);
             };
-            if snapshot.contains_key(&repo.top) {
+            if snapshot.contains_key(&repo.dir) {
                 continue;
             }
-            if !self.trees.contains_key(&repo.top) {
-                let forced = self.project.tool_files(&repo.top);
+            if !self.trees.contains_key(&repo.dir) {
+                let forced = self.project.tool_files(&repo.dir);
                 let Some(tree) = repo.tree(&scratch, &forced)? else {
                     return Ok(None);
                 };
-                self.trees.insert(repo.top.clone(), tree);
+                self.trees.insert(repo.dir.clone(), tree);
             }
-            snapshot.insert(repo.top.clone(), self.trees[&repo.top].clone());
+            snapshot.insert(repo.dir.clone(), self.trees[&repo.dir].clone());
         }
         Ok(Some(snapshot))
     }
@@ -344,13 +362,13 @@ impl<'p> Runner<'p> {
             .roots()
             .iter()
             .filter_map(|r| r.repo.as_ref())
-            .map(|r| (&r.top, r))
+            .map(|r| (&r.dir, r))
             .collect();
         let mut paths = Vec::new();
-        for (top, tree) in now {
-            let old = last.get(top)?;
+        for (dir, tree) in now {
+            let old = last.get(dir)?;
             if old != tree {
-                paths.extend(repos.get(top)?.changed(old, tree)?);
+                paths.extend(repos.get(dir)?.changed(old, tree)?);
             }
         }
         Some(paths)
@@ -362,7 +380,7 @@ impl<'p> Runner<'p> {
         let mut versions = vec![tools.rustc(&root.dir).to_owned()];
         // The steps of a shared pass need one identity, and any of them may run the tests.
         let tests = match step.shared {
-            Some(_) => root.lanes.test_runner == TestRunner::Nextest,
+            Some(_) => root.config.test_runner == TestRunner::Nextest,
             None => step.kind == Kind::Nextest,
         };
         if tests {

@@ -27,46 +27,48 @@
     reason = "a command-line tool warns on its terminal"
 )]
 
-mod cli;
+mod capture;
+mod ci;
+mod config;
 mod console;
 mod context;
 mod digest;
 mod error;
 mod flag_set;
-mod git;
 mod invocation;
 mod journal;
-mod lanes;
 mod member;
 mod metadata;
 mod outcome;
-mod output;
 mod passes;
 mod platform;
+mod process;
 mod project;
 mod project_command;
-mod reads;
+mod reader;
+mod repo;
 mod root;
 mod runner;
 mod step;
 mod sweep;
-mod tool;
+mod task;
 mod tools;
 mod version;
+mod vocabulary;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use crate::cli::Task;
+use crate::ci::Ci;
 use crate::context::Context;
 use crate::digest::Digest;
 use crate::error::{Error, Result};
 use crate::invocation::Invocation;
 use crate::journal::{End, Journal, Record};
-use crate::output::Ci;
 use crate::project::Project;
 use crate::runner::{Finished, Runner};
 use crate::step::planner::Files;
+use crate::task::Task;
 
 fn main() -> ExitCode {
     let task = Task::parse();
@@ -101,7 +103,7 @@ fn main() -> ExitCode {
     let outcomes = finished.map_or(&[][..], |f| f.outcomes.as_slice());
     let project = finished.map(|f| f.top.as_path());
     // The log serves later analysis: a failure to write it fails no check.
-    if let Some(dir) = platform::log_dir() {
+    if let Some(dir) = platform::journal_dir() {
         let driver = cx.tools.driver().to_owned();
         // Out of a project, the toolchain of the folder the driver ran in.
         let rustc = cx.tools.rustc(project.unwrap_or(&cx.here)).to_owned();

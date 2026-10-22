@@ -51,6 +51,20 @@ pub(crate) enum Error {
     NothingToPackage {
         dir: PathBuf,
     },
+    /// The vocabulary of a root outside git, which lists the files it reads.
+    NoRepository {
+        dir: PathBuf,
+    },
+    /// A record of `git ls-files --stage` that holds no mode and path.
+    GitRecord {
+        dir: PathBuf,
+        record: String,
+    },
+    /// A path git lists that is not UTF-8, given with each byte that is not as U+FFFD.
+    NotUtf8Path {
+        dir: PathBuf,
+        path: String,
+    },
 }
 
 /// What is wrong with a root's `drive` table.
@@ -166,6 +180,21 @@ impl fmt::Display for Error {
             Self::NothingToPackage { dir } => write!(
                 f,
                 "the drive table of {} names no binary to package",
+                dir.display()
+            ),
+            Self::NoRepository { dir } => write!(
+                f,
+                "{} is in no git repository, which the vocabulary lists the files of",
+                dir.display()
+            ),
+            Self::GitRecord { dir, record } => write!(
+                f,
+                "git ls-files in {} lists {record:?}, which is no file's record",
+                dir.display()
+            ),
+            Self::NotUtf8Path { dir, path } => write!(
+                f,
+                "git ls-files in {} lists {path:?}, which is not UTF-8",
                 dir.display()
             ),
         }

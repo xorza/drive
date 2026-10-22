@@ -16,7 +16,7 @@ refuses to run:
 
 ```toml
 [workspace.metadata.drive]   # or [package.metadata.drive] in a single-package root
-version = "0.2.2"
+version = "0.2.3"
 ```
 
 ## Use
@@ -30,6 +30,7 @@ cargo drive bench [args]   # the benches; criterion's arguments select some
 cargo drive gate           # every check CI runs; CI adds --ci
 cargo drive run NAME       # a command of the workspace's own drive table
 cargo drive package        # the release build of the binaries the table names
+cargo drive vocabulary     # every declared name and word, for a review: target/drive/vocabulary.txt
 ```
 
 A run ends on one line: `ok`, or `FAIL` with the failed steps and the first error, and the file

@@ -3,8 +3,8 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
+use crate::ci::Ci;
 use crate::outcome::Outcome;
-use crate::output::Ci;
 
 /// The months of run log kept: the current one and the two before it.
 const MONTHS_KEPT: i64 = 3;
