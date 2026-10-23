@@ -3,6 +3,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use crate::aside;
 use crate::error::{Error, Result};
 
 /// A tree for each repository a step reads: its root's, and those of the roots it builds
@@ -70,16 +71,11 @@ impl Passes {
             snapshot,
         };
         self.file.kept.insert(key.slot, kept);
-        let aside = self
-            .path
-            .with_file_name(format!("passes-{}.tmp", std::process::id()));
         let bytes = serde_json::to_vec(&self.file).expect("a map of strings serializes");
-        let io = |source| Error::Io {
+        aside::write(&self.path, bytes).map_err(|source| Error::Io {
             path: self.path.clone(),
             source,
-        };
-        std::fs::write(&aside, bytes).map_err(io)?;
-        std::fs::rename(&aside, &self.path).map_err(io)
+        })
     }
 }
 

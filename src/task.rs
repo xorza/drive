@@ -21,6 +21,12 @@ pub(crate) enum Task {
     Package,
     /// The vocabulary of every root's repository, to the file given or to the driver's own.
     Vocabulary(Option<PathBuf>),
+    /// The public API surface of the member named, of any root, or of the top root's package, to
+    /// the file given or to the member's `.notes/API_SURFACE.md`.
+    Surface {
+        package: Option<String>,
+        out: Option<PathBuf>,
+    },
 }
 
 impl Task {
@@ -36,6 +42,7 @@ impl Task {
             Self::Run { .. } => "run",
             Self::Package => "package",
             Self::Vocabulary(_) => "vocabulary",
+            Self::Surface { .. } => "surface",
         }
     }
 
@@ -62,7 +69,9 @@ impl Task {
         match (self, ci) {
             (Self::Sweep(sweep), _) => sweep.files(),
             (Self::Package | Self::Vocabulary(_), _) | (_, Ci::GitHub) => Files::Keep,
-            (Self::Test(_) | Self::Bench(_) | Self::Run { .. }, Ci::No) => Files::Write,
+            (Self::Test(_) | Self::Bench(_) | Self::Run { .. } | Self::Surface { .. }, Ci::No) => {
+                Files::Write
+            }
         }
     }
 
@@ -73,6 +82,10 @@ impl Task {
             Self::Sweep(Sweep::GateCi) => vec!["--ci".to_owned()],
             Self::Vocabulary(out) => (out.iter())
                 .map(|out| out.to_string_lossy().into_owned())
+                .collect(),
+            Self::Surface { package, out } => (package.iter())
+                .flat_map(|package| ["-p".to_owned(), package.clone()])
+                .chain(out.iter().map(|out| out.to_string_lossy().into_owned()))
                 .collect(),
             Self::Sweep(Sweep::Check | Sweep::Gate) | Self::Package => Vec::new(),
         }
@@ -105,6 +118,10 @@ impl Task {
             },
             "package" => Self::Package,
             "vocabulary" => Self::Vocabulary(sub.get_one::<PathBuf>("out").cloned()),
+            "surface" => Self::Surface {
+                package: sub.get_one::<String>("package").cloned(),
+                out: sub.get_one::<PathBuf>("out").cloned(),
+            },
             _ => unreachable!("clap knows only these subcommands"),
         }
     }
@@ -180,6 +197,33 @@ fn command() -> Command {
                         .value_parser(value_parser!(PathBuf))
                         .help(
                             "The file it goes to; target/drive/vocabulary.txt when none is given",
+                        ),
+                ),
+        )
+        .subcommand(
+            Command::new("surface")
+                .about(
+                    "The public API surface of a package: every item it exports, rendered as its \
+                     declaration from rustdoc JSON, over no features and each public feature \
+                     alone, in one file whose order is fixed, for a review of the API",
+                )
+                .arg(
+                    Arg::new("package")
+                        .short('p')
+                        .long("package")
+                        .value_name("PACKAGE")
+                        .help(
+                            "The member it renders, of any root; the root's package when none \
+                             is given",
+                        ),
+                )
+                .arg(
+                    Arg::new("out")
+                        .value_name("OUT")
+                        .value_parser(value_parser!(PathBuf))
+                        .help(
+                            "The file it goes to; the package's .notes/API_SURFACE.md when none \
+                             is given",
                         ),
                 ),
         );
@@ -273,18 +317,45 @@ mod tests {
         let to = parse(&["cargo-drive", "drive", "vocabulary", "out/words.txt"]);
         assert_eq!(to, Task::Vocabulary(Some(PathBuf::from("out/words.txt"))));
         assert_eq!(to.args(), ["out/words.txt"]);
+        let surface = parse(&["cargo-drive", "drive", "surface"]);
+        assert_eq!(
+            surface,
+            Task::Surface {
+                package: None,
+                out: None
+            }
+        );
+        assert_eq!(
+            (surface.name(), surface.args(), surface.output_file()),
+            ("surface", Vec::new(), "last-surface.txt".to_owned())
+        );
+        let named = parse(&["cargo-drive", "drive", "surface", "-p", "ui", "api.md"]);
+        assert_eq!(
+            named,
+            Task::Surface {
+                package: Some("ui".to_owned()),
+                out: Some(PathBuf::from("api.md"))
+            }
+        );
+        assert_eq!(named.args(), ["-p", "ui", "api.md"]);
+        assert_eq!(
+            parse(&["cargo-drive", "drive", "surface", "--package", "ui"]).args(),
+            ["-p", "ui"]
+        );
         let files = |task: &Task| [Ci::No, Ci::GitHub].map(|ci| task.files(ci));
         assert_eq!(files(&check), [Files::Write; 2]);
         assert_eq!(files(&ci), [Files::Keep; 2]);
         assert_eq!(files(&package), [Files::Keep; 2]);
         assert_eq!(files(&vocabulary), [Files::Keep; 2]);
-        for task in [&bench, &lan, &Task::Test(Vec::new())] {
+        for task in [&bench, &lan, &surface, &Task::Test(Vec::new())] {
             assert_eq!(files(task), [Files::Write, Files::Keep]);
         }
         let fails = |argv: &[&str]| command().try_get_matches_from(argv).is_err();
         assert!(fails(&["cargo-drive", "drive", "run"]));
         assert!(fails(&["cargo-drive", "drive", "package", "x"]));
         assert!(fails(&["cargo-drive", "drive", "vocabulary", "a", "b"]));
+        assert!(fails(&["cargo-drive", "drive", "surface", "a", "b"]));
+        assert!(fails(&["cargo-drive", "drive", "surface", "-p"]));
         assert!(fails(&["cargo-drive", "drive"]));
         assert!(fails(&["cargo-drive", "drive", "check", "-p", "x"]));
         assert!(fails(&["cargo-drive", "drive", "check", "--ci"]));

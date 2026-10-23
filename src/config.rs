@@ -308,6 +308,8 @@ mod tests {
             doctest: false,
             benches: false,
             binaries: binaries.iter().map(|&b| b.to_owned()).collect(),
+            lib: None,
+            features: Vec::new(),
             outside: Vec::new(),
         };
         let members = [member("app", &["app", "tool"]), member("core", &[])];

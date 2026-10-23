@@ -332,3 +332,57 @@ fn numbered_lanes() {
     assert_eq!(numbered("lint", 0, 1), "lint");
     assert_eq!(numbered("lint", 1, 3), "lint.2");
 }
+
+#[test]
+fn a_surface_documents_no_features_then_each_public_feature_alone() {
+    let mut root = Root::fixture();
+    assert_eq!(root.members[0].lib.as_deref(), Some("lib"));
+    root.members[0].features = ["default", "fast", "internals", "serde"]
+        .map(str::to_owned)
+        .into();
+    let member = &root.members[0];
+    let out = PathBuf::from("/w/core/.notes/API_SURFACE.md");
+    let steps = keep(&root).surface(member, "lib", out.clone());
+    let names: Vec<&str> = steps.iter().map(|s| s.name.as_str()).collect();
+    assert_eq!(
+        names,
+        [
+            "rustdoc.no-default",
+            "surface.no-default",
+            "rustdoc.fast",
+            "surface.fast",
+            "rustdoc.serde",
+            "surface.serde",
+            "surface",
+        ]
+    );
+    let rustdoc = |features: &str| {
+        format!(
+            "rustdoc -p core --lib --no-default-features {features}--locked -Zunstable-options \
+             --output-format json --message-format=json-diagnostic-short --target-dir \
+             /w/target/drive/surface -- --document-hidden-items"
+        )
+    };
+    assert_eq!(join(&steps[0]), rustdoc(""));
+    assert_eq!(join(&steps[2]), rustdoc("--features fast "));
+    assert_eq!(
+        steps[0].env,
+        [
+            ("RUSTDOCFLAGS".to_owned(), None),
+            ("RUSTC_BOOTSTRAP".to_owned(), Some("1".to_owned()))
+        ]
+    );
+    assert_eq!(steps[0].kind, Kind::Check);
+    let json = PathBuf::from("/w/target/drive/surface/doc/lib.json");
+    assert_eq!(
+        steps[3].action,
+        Action::SurfaceBuild {
+            build: Build::Feature("fast".to_owned()),
+            json
+        }
+    );
+    assert_eq!(steps[6].action, Action::Surface { out: out.clone() });
+    assert!(steps.iter().all(|s| s.runs == Runs::Always));
+    let write = Planner::new(&root, Files::Write).surface(&root.members[0], "lib", out);
+    assert_eq!(join(&write[0]), rustdoc("").replace("--locked ", ""));
+}

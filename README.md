@@ -31,6 +31,7 @@ cargo drive gate           # every check CI runs; CI adds --ci
 cargo drive run NAME       # a command of the workspace's own drive table
 cargo drive package        # the release build of the binaries the table names
 cargo drive vocabulary     # every declared name and word, for a review: target/drive/vocabulary.txt
+cargo drive surface        # the root package's public API, for a review: .notes/API_SURFACE.md
 ```
 
 A run ends on one line: `ok`, or `FAIL` with the failed steps and the first error, and the file

@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use crate::member::Member;
 use crate::passes::PassKey;
 use crate::root::Root;
+use crate::surface::build::Build;
 
 /// What a step runs, which says what its output holds and what its failure means.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -22,7 +23,7 @@ pub(crate) enum Kind {
     /// `cargo test --doc`: a build, then the doc tests.
     Doctests,
     /// A step whose output the driver passes on as it is: a bench, a project's command, a
-    /// packaging move, the vocabulary.
+    /// packaging move, the vocabulary, the surface.
     Plain,
 }
 
@@ -63,6 +64,11 @@ pub(crate) enum Action {
     Copy { from: PathBuf, to: PathBuf },
     /// No process: the vocabulary of every root's repository, written to `out`.
     Vocabulary { out: PathBuf },
+    /// No process: the exports of `build`, from the rustdoc JSON at `json`, added to the
+    /// surface the command writes.
+    SurfaceBuild { build: Build, json: PathBuf },
+    /// No process: the surface of every build before it, written to `out`.
+    Surface { out: PathBuf },
 }
 
 /// One command on one root, cargo's or another program's.
@@ -144,6 +150,8 @@ impl Step {
             Action::Program(path) => path.display().to_string(),
             Action::Copy { from, .. } => format!("a copy of {}", from.display()),
             Action::Vocabulary { .. } => "the vocabulary".to_owned(),
+            Action::SurfaceBuild { build, .. } => format!("the surface of {build}"),
+            Action::Surface { .. } => "the surface".to_owned(),
         }
     }
 

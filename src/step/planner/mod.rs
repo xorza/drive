@@ -5,10 +5,12 @@ use std::path::{Path, PathBuf};
 
 use crate::config::TestRunner;
 use crate::flag_set::FlagSet;
+use crate::member::Member;
 use crate::platform::{self, SplitBy};
 use crate::project_command::{CommandAction, CommandStep, Joins, ProjectCommand};
 use crate::root::{Lockfile, Root};
 use crate::step::{Action, Kind, Runs, SharedPass, Step};
+use crate::surface::build::Build;
 use crate::sweep::Sweep;
 
 /// Cargo's messages as JSON, each diagnostic short: the driver tells a lint from code that does
@@ -19,6 +21,8 @@ const DENY: [&str; 3] = ["--", "-D", "warnings"];
 /// The bench targets alone: `--benches` also selects each library and binary, whose `bench` flag
 /// is on by default, and hands them the bench binaries' arguments.
 const EVERY_BENCH: [&str; 2] = ["--bench", "*"];
+/// Features that are not public surface: the default set, and the crate's own test surface.
+const NOT_SURFACE: [&str; 2] = ["default", "internals"];
 const QUIET_NEXTEST: [&str; 10] = [
     "--show-progress",
     "none",
@@ -399,6 +403,67 @@ impl<'r> Planner<'r> {
             runs: Runs::Always,
             ..Step::new(self.root, "vocabulary", Kind::Plain, Vec::new())
         }
+    }
+
+    /// The public API surface of `member`, whose library's crate name is `lib`, written to `out`:
+    /// rustdoc JSON with no features, then with each public feature alone, each read before the
+    /// next build writes the same file. Stable rustdoc writes JSON under `RUSTC_BOOTSTRAP`, in a
+    /// target folder of its own: the build scripts that read the variable, as `proc-macro2`'s,
+    /// would otherwise run again in the next build of every other step.
+    pub(crate) fn surface(self, member: &Member, lib: &str, out: PathBuf) -> Vec<Step> {
+        let target = self.root.target_dir.join("drive").join("surface");
+        let json = target.join("doc").join(format!("{lib}.json"));
+        let features = (member.features.iter())
+            .filter(|feature| !NOT_SURFACE.contains(&feature.as_str()))
+            .cloned()
+            .map(Build::Feature);
+        let mut steps = Vec::new();
+        for build in std::iter::once(Build::NoDefault).chain(features) {
+            let name = build.to_string();
+            let mut argv = vec![
+                "rustdoc",
+                "-p",
+                member.name.as_str(),
+                "--lib",
+                "--no-default-features",
+            ];
+            if let Build::Feature(feature) = &build {
+                argv.extend(["--features", feature.as_str()]);
+            }
+            argv.extend(self.lock());
+            argv.extend(["-Zunstable-options", "--output-format", "json", JSON]);
+            let mut rustdoc = Step::new(self.root, &format!("rustdoc.{name}"), Kind::Check, argv);
+            rustdoc.argv.extend([
+                OsString::from("--target-dir"),
+                target.clone().into(),
+                OsString::from("--"),
+                OsString::from("--document-hidden-items"),
+            ]);
+            rustdoc
+                .env
+                .push(("RUSTC_BOOTSTRAP".to_owned(), Some("1".to_owned())));
+            rustdoc.runs = Runs::Always;
+            steps.push(rustdoc);
+            steps.push(Step {
+                action: Action::SurfaceBuild {
+                    build,
+                    json: json.clone(),
+                },
+                runs: Runs::Always,
+                ..Step::new(
+                    self.root,
+                    &format!("surface.{name}"),
+                    Kind::Plain,
+                    Vec::new(),
+                )
+            });
+        }
+        steps.push(Step {
+            action: Action::Surface { out },
+            runs: Runs::Always,
+            ..Step::new(self.root, "surface", Kind::Plain, Vec::new())
+        });
+        steps
     }
 
     /// The steps of `sweep`, the lints first, as they answer in seconds, and the docs last. A

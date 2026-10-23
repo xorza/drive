@@ -1,6 +1,6 @@
 [package]
 name = "cargo-drive"
-version = "0.2.3"
+version = "0.2.4"
 edition = "2024"
 description = "The one way to check, test, document and bench a Cargo workspace"
 repository = "https://github.com/xorza/drive"
@@ -16,6 +16,8 @@ clap = { version = "4.6", default-features = false, features = [
 ] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0" }
+# Exact: each release reads one rustdoc JSON format, the one the stable toolchain writes.
+rustdoc-types = "=0.61.0"
 proc-macro2 = { version = "1.0", default-features = false }
 quote = { version = "1.0", default-features = false }
 syn = { version = "3.0", default-features = false, features = [

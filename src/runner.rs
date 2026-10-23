@@ -16,6 +16,7 @@ use crate::project::Project;
 use crate::repo::Repo;
 use crate::root::{Reach, Root};
 use crate::step::{Action, Kind, Runs, Step};
+use crate::surface::Surface;
 use crate::vocabulary::Vocabulary;
 
 /// Whether a command reuses and keeps the passes of its steps.
@@ -116,6 +117,8 @@ pub(crate) struct Runner<'p> {
     /// Each repository's tree, as it stands since the last step that ran: a step that runs can
     /// write files, as `fmt` does.
     trees: BTreeMap<PathBuf, String>,
+    /// The exports of each surface build read so far, which the surface step writes.
+    surface: Surface,
 }
 
 impl<'p> Runner<'p> {
@@ -139,6 +142,7 @@ impl<'p> Runner<'p> {
             passes,
             outcomes: Vec::new(),
             trees: BTreeMap::new(),
+            surface: Surface::default(),
         })
     }
 
@@ -268,6 +272,32 @@ impl<'p> Runner<'p> {
                 std::fs::rename(&aside, &log).map_err(io(log.clone()))?;
                 let out = out.strip_prefix(&self.cx.here).unwrap_or(out);
                 return Ok(Outcome::listed(step, unparsed, out, started.elapsed(), log));
+            }
+            Action::SurfaceBuild { build, json } => {
+                let started = Instant::now();
+                self.surface.read(build.clone(), json)?;
+                drop(file);
+                std::fs::rename(&aside, &log).map_err(io(log.clone()))?;
+                return Ok(Outcome::done(step, String::new(), started.elapsed(), log));
+            }
+            Action::Surface { out } => {
+                let started = Instant::now();
+                self.surface.write(out)?;
+                let unreached = self.surface.unreached();
+                let mut file = file;
+                for path in &unreached {
+                    writeln!(file, "public but not exported: {path}").map_err(io(aside.clone()))?;
+                }
+                drop(file);
+                std::fs::rename(&aside, &log).map_err(io(log.clone()))?;
+                let out = out.strip_prefix(&self.cx.here).unwrap_or(out);
+                let note = format!(
+                    "{} items, {} unreached; {}",
+                    self.surface.item_count(),
+                    unreached.len(),
+                    out.display()
+                );
+                return Ok(Outcome::done(step, note, started.elapsed(), log));
             }
         };
         command.args(&step.argv).current_dir(&root.dir);

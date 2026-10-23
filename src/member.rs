@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use crate::metadata::{self, TargetKind};
 
-/// A workspace member, as much of it as the lanes and the reach of a change read.
+/// A workspace member, as much of it as the lanes, the reach of a change and the surface read.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct Member {
     pub(crate) name: String,
@@ -12,6 +12,10 @@ pub(crate) struct Member {
     pub(crate) benches: bool,
     /// The names of its binary targets.
     pub(crate) binaries: Vec<String>,
+    /// Its library's crate name, which names rustdoc's output.
+    pub(crate) lib: Option<String>,
+    /// The names of its features, sorted.
+    pub(crate) features: Vec<String>,
     /// The folders of its path dependencies outside the workspace.
     pub(crate) outside: Vec<PathBuf>,
 }
@@ -35,6 +39,11 @@ impl Member {
                 .filter(|t| t.kind.contains(&TargetKind::Bin))
                 .map(|t| t.name.clone())
                 .collect(),
+            lib: targets
+                .iter()
+                .find(|t| t.kind.iter().any(|k| k.is_library()))
+                .map(|t| t.name.replace('-', "_")),
+            features: package.features.keys().cloned().collect(),
             outside: package
                 .dependencies
                 .iter()

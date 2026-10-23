@@ -13,6 +13,7 @@ use std::fmt::{self, Write};
 use std::path::Path;
 use std::str::Utf8Error;
 
+use crate::aside;
 use crate::error::{Error, Result};
 use crate::project::Project;
 use crate::repo::Repo;
@@ -208,18 +209,9 @@ impl Vocabulary {
     /// Writes the text to `out` aside and moves it in whole, so a run beside this one leaves the
     /// file whole.
     pub(crate) fn write(&self, out: &Path) -> Result<()> {
-        let name = out.file_name().unwrap_or_default().to_string_lossy();
-        let aside = out.with_file_name(format!("{name}-{}.tmp", std::process::id()));
-        std::fs::write(&aside, self.text()).map_err(|source| Error::Io {
-            path: aside.clone(),
+        aside::write(out, self.text()).map_err(|source| Error::Io {
+            path: out.to_owned(),
             source,
-        })?;
-        std::fs::rename(&aside, out).map_err(|source| {
-            std::fs::remove_file(&aside).ok();
-            Error::Io {
-                path: out.to_owned(),
-                source,
-            }
         })
     }
 

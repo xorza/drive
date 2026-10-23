@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
+use crate::aside;
 use crate::ci::Ci;
 
 /// The driver's terminal. Outside CI it keeps each line it prints for the run's output file: an
@@ -53,21 +54,13 @@ impl Console {
         self.text.is_some()
     }
 
-    /// Every line printed, in place of what `path` held: written aside and moved there whole, so
-    /// a run beside this one leaves the file whole.
+    /// Every line printed, in place of what `path` held.
     pub(crate) fn save(&self, path: &Path) -> std::io::Result<()> {
         let text = self
             .text
             .as_deref()
             .expect("a console that keeps its lines");
-        let name = path.file_name().expect("an output file has a name");
-        let aside = path.with_file_name(format!(
-            "{}-{}.tmp",
-            name.to_string_lossy(),
-            std::process::id()
-        ));
-        std::fs::write(&aside, text)?;
-        std::fs::rename(&aside, path)
+        aside::write(path, text)
     }
 }
 

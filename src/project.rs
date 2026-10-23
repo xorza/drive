@@ -80,6 +80,19 @@ impl Project {
 }
 
 #[cfg(test)]
+pub(crate) mod internals {
+    use crate::project::Project;
+    use crate::root::Root;
+
+    impl Project {
+        /// A project of `roots`, the top one first.
+        pub(crate) const fn fixture(roots: Vec<Root>) -> Self {
+            Self { roots }
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::repo::Repo;

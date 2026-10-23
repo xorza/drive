@@ -27,6 +27,7 @@
     reason = "a command-line tool warns on its terminal"
 )]
 
+mod aside;
 mod capture;
 mod ci;
 mod config;
@@ -50,6 +51,7 @@ mod repo;
 mod root;
 mod runner;
 mod step;
+mod surface;
 mod sweep;
 mod task;
 mod tools;

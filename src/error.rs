@@ -65,6 +65,28 @@ pub(crate) enum Error {
         dir: PathBuf,
         path: String,
     },
+    /// `surface -p` of a name no member of any root has.
+    UnknownPackage {
+        name: String,
+        known: Vec<String>,
+    },
+    /// `surface` without `-p` in a root that is no package.
+    NoRootPackage {
+        dir: PathBuf,
+    },
+    /// `surface` of a member with no library, which alone rustdoc documents.
+    NoLibrary {
+        package: String,
+    },
+    RustdocJson {
+        path: PathBuf,
+        source: serde_json::Error,
+    },
+    /// Rustdoc JSON of a format other than the one the driver's `rustdoc-types` reads.
+    RustdocFormat {
+        path: PathBuf,
+        found: u32,
+    },
 }
 
 /// What is wrong with a root's `drive` table.
@@ -196,6 +218,25 @@ impl fmt::Display for Error {
                 f,
                 "git ls-files in {} lists {path:?}, which is not UTF-8",
                 dir.display()
+            ),
+            Self::UnknownPackage { name, known } => {
+                write!(f, "no member `{name}`; the members: {}", known.join(", "))
+            }
+            Self::NoRootPackage { dir } => write!(
+                f,
+                "{} is a workspace of no package of its own; name a member with -p",
+                dir.display()
+            ),
+            Self::NoLibrary { package } => {
+                write!(f, "`{package}` has no library, which the surface documents")
+            }
+            Self::RustdocJson { path, source } => write!(f, "{}: {source}", path.display()),
+            Self::RustdocFormat { path, found } => write!(
+                f,
+                "{} is rustdoc JSON format {found}, and the driver reads format {}: the \
+                 toolchain writes a format of another release of `rustdoc-types`",
+                path.display(),
+                rustdoc_types::FORMAT_VERSION
             ),
         }
     }

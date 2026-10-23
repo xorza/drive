@@ -100,6 +100,15 @@ impl Outcome {
         }
     }
 
+    /// A step the driver ran itself that passed, in `elapsed`, logged in `log`.
+    pub(crate) fn done(step: &Step, note: String, elapsed: Duration, log: PathBuf) -> Self {
+        Self {
+            elapsed,
+            log: Some(log),
+            ..Self::not_run(&step.name, Status::Ok, note)
+        }
+    }
+
     /// A step that passed on these inputs before, so it did not run.
     pub(crate) fn reused(name: &str, note: String) -> Self {
         Self {
