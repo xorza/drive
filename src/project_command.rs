@@ -6,12 +6,16 @@ use crate::config::TestRunner;
 use crate::error::ConfigError;
 
 /// A command of the project's own, `cargo drive run <name> [args]`, as its `commands.<name>`
-/// table gives it: its steps, in order, and the command of the driver whose run it joins too.
+/// table gives it: its steps, in order, the command of the driver whose run it joins too, and the
+/// texts that mark a line of its plain steps' output as an error.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ProjectCommand {
     pub(crate) name: String,
     pub(crate) joins: Option<Joins>,
     pub(crate) steps: Vec<CommandStep>,
+    /// A failed plain step shows its lines that hold one, or its last lines where none does:
+    /// a program's first lines are seldom its error.
+    pub(crate) errors: Vec<String>,
 }
 
 /// The command of the driver whose run a project command joins, where it runs there.
@@ -48,12 +52,20 @@ pub(crate) enum CommandAction {
     Tests(String),
 }
 
+impl CommandAction {
+    /// Its output is its own, which the driver does not read as diagnostics or tests.
+    pub(crate) const fn plain(&self) -> bool {
+        matches!(self, Self::Cargo(_) | Self::Program(_))
+    }
+}
+
 /// A `commands.<name>` table.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct CommandTable {
     joins: Option<Joins>,
     steps: Vec<StepTable>,
+    errors: Option<Vec<String>>,
 }
 
 /// A step's table: one of `build`, `cargo`, `program` and `tests`, with its variables, and
@@ -73,14 +85,18 @@ struct StepTable {
 
 impl ProjectCommand {
     /// The command `name` of `table`; an error for a command of no step, a step of no kind or of
-    /// two, the arguments taken by two steps, and tests under a runner other than nextest, which
-    /// alone takes a filter.
+    /// two, the arguments taken by two steps, tests under a runner other than nextest, which
+    /// alone takes a filter, and error texts that are empty, or that no plain step prints.
     pub(crate) fn resolve(
         name: String,
         table: CommandTable,
         runner: TestRunner,
     ) -> Result<Self, ConfigError> {
-        let CommandTable { joins, steps } = table;
+        let CommandTable {
+            joins,
+            steps,
+            errors,
+        } = table;
         if steps.is_empty() {
             return Err(ConfigError::EmptyList {
                 key: "commands.steps",
@@ -89,12 +105,32 @@ impl ProjectCommand {
         if steps.iter().filter(|step| step.args).count() > 1 {
             return Err(ConfigError::ArgsTwice { command: name });
         }
-        let steps = steps
+        let steps: Vec<CommandStep> = steps
             .into_iter()
             .enumerate()
             .map(|(at, step)| step.resolve(&name, at, runner))
             .collect::<Result<_, _>>()?;
-        Ok(Self { name, joins, steps })
+        let errors = match errors {
+            None => Vec::new(),
+            Some(errors) if errors.is_empty() => {
+                return Err(ConfigError::EmptyList {
+                    key: "commands.errors",
+                });
+            }
+            Some(errors) if errors.iter().any(String::is_empty) => {
+                return Err(ConfigError::EmptyErrorText { command: name });
+            }
+            Some(_) if !steps.iter().any(|step| step.action.plain()) => {
+                return Err(ConfigError::ErrorsUnread { command: name });
+            }
+            Some(errors) => errors,
+        };
+        Ok(Self {
+            name,
+            joins,
+            steps,
+            errors,
+        })
     }
 
     /// Whether a step takes the command's arguments.
@@ -223,6 +259,30 @@ mod tests {
                 nextest
             )
             .contains("unknown variant `check`")
+        );
+        assert!(lan.errors.is_empty());
+        let check = |errors| json!({ "steps": [{ "cargo": "run" }], "errors": errors });
+        assert_eq!(
+            resolve(check(json!(["ERROR", "error["])), nextest)
+                .unwrap()
+                .errors,
+            ["ERROR", "error["]
+        );
+        assert_eq!(
+            fails(check(json!([])), nextest),
+            "drive.commands.errors: must be a non-empty list"
+        );
+        assert_eq!(
+            fails(check(json!(["ERROR", ""])), nextest),
+            "drive.commands.lan: an error text is empty, which every line holds"
+        );
+        assert_eq!(
+            fails(
+                json!({ "steps": [{ "build": "b" }, { "tests": "all()" }], "errors": ["E"] }),
+                nextest
+            ),
+            "drive.commands.lan: `errors` marks the lines of a `cargo` or `program` step, and \
+             the command has none"
         );
     }
 }

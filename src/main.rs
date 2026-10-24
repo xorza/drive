@@ -14,9 +14,11 @@
 //! macOS, `%LOCALAPPDATA%\drive\logs\` on Windows.
 //!
 //! A run ends on its verdict, one line for an agent that reads only the last: the result, the first
-//! cause of a failure, and `target/drive/last-<command>.txt`, which holds every line the run
-//! printed. Above it, each failed step shows the first lines it printed. Libtest's passes stay out
-//! of the step logs, as nextest's do.
+//! cause of a failure, and `target/drive/last-<command>.txt`, which holds every line of the run.
+//! Above it, each failed step shows its own lines: its errors, each failed test with where and why
+//! it panicked, or a program's last lines where none holds its error texts. On a pipe, as an agent reads it, the driver prints only each step's line and
+//! that digest, and a plain step's output, which is its result. Libtest's passes stay out of the
+//! step logs, as nextest's do.
 //!
 //! `cargo install --locked --git https://github.com/xorza/drive` puts `cargo-drive` on `PATH`,
 //! which cargo runs as `cargo drive`. It checks the workspace of the folder it runs in, and each
@@ -35,6 +37,8 @@ mod console;
 mod context;
 mod digest;
 mod error;
+mod excerpt;
+mod failures;
 mod flag_set;
 mod invocation;
 mod journal;
@@ -58,10 +62,12 @@ mod tools;
 mod version;
 mod vocabulary;
 
+use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 use crate::ci::Ci;
+use crate::console::Stdout;
 use crate::context::Context;
 use crate::digest::Digest;
 use crate::error::{Error, Result};
@@ -85,7 +91,12 @@ fn main() -> ExitCode {
         Ok(here) => (here, None),
         Err(source) => (PathBuf::new(), Some(source)),
     };
-    let mut cx = Context::new(ci, here);
+    let stdout = if std::io::stdout().is_terminal() {
+        Stdout::Terminal
+    } else {
+        Stdout::Piped
+    };
+    let mut cx = Context::new(ci, stdout, here);
     let result = match missing {
         None => run(&task, &mut journal, &mut cx),
         Some(source) => Err(Error::Io {

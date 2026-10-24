@@ -44,6 +44,16 @@ pub(crate) enum Files {
     Keep,
 }
 
+/// What a test lane's step runs.
+#[derive(Debug, Clone, Copy)]
+enum Lane<'a> {
+    /// The tests, with the runner's arguments: nextest's, or the test binaries' under
+    /// `cargo test`.
+    Tests(&'a [String]),
+    /// The build of the tests alone.
+    Build,
+}
+
 /// The steps of one root's lanes, each as `files` allows.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Planner<'r> {
@@ -138,24 +148,24 @@ impl<'r> Planner<'r> {
         let sets = &self.root.config.test;
         let lane = |(i, set): (usize, &FlagSet)| Step {
             runs,
-            ..self.test_lane(&numbered("tests", i, sets.len()), set, extra)
+            ..self.test_lane(&numbered("tests", i, sets.len()), set, Lane::Tests(extra))
         };
         sets.iter().enumerate().map(lane).collect()
     }
 
-    /// The tests of `set`, with `extra`, the runner's arguments: nextest's, or the test binaries'
-    /// under `cargo test`.
-    fn test_lane(self, name: &str, set: &FlagSet, extra: &[String]) -> Step {
-        let (kind, mut argv) = match self.root.config.test_runner {
-            TestRunner::Nextest => (Kind::Nextest, vec!["nextest", "run", "--workspace"]),
-            TestRunner::CargoTest => (Kind::CargoTest, vec!["test", "--workspace"]),
+    /// The tests of `set` as `lane` runs them: nextest's command, or `cargo test`'s. The build
+    /// alone is the same cargo command, less what selects and prints the tests.
+    fn test_lane(self, name: &str, set: &FlagSet, lane: Lane<'_>) -> Step {
+        let runner = self.root.config.test_runner;
+        let mut argv = match runner {
+            TestRunner::Nextest => vec!["nextest", "run", "--workspace"],
+            TestRunner::CargoTest => vec!["test", "--workspace"],
         };
         argv.extend(set.args());
-        match self.root.config.test_runner {
+        match runner {
             TestRunner::Nextest => {
                 argv.extend(self.lock());
                 argv.extend(["--cargo-message-format", "json-diagnostic-short"]);
-                argv.extend(QUIET_NEXTEST);
             }
             TestRunner::CargoTest => {
                 // The doc tests are a lane of their own.
@@ -164,12 +174,26 @@ impl<'r> Planner<'r> {
                 }
                 argv.extend(self.lock());
                 argv.push(JSON);
+            }
+        }
+        let kind = match (lane, runner) {
+            (Lane::Build, _) => {
+                argv.push("--no-run");
+                Kind::Check
+            }
+            (Lane::Tests(extra), TestRunner::Nextest) => {
+                argv.extend(QUIET_NEXTEST);
+                argv.extend(extra.iter().map(String::as_str));
+                Kind::Nextest
+            }
+            (Lane::Tests(extra), TestRunner::CargoTest) => {
                 if !extra.is_empty() {
                     argv.push("--");
                 }
+                argv.extend(extra.iter().map(String::as_str));
+                Kind::CargoTest
             }
-        }
-        argv.extend(extra.iter().map(String::as_str));
+        };
         Step {
             label: set.label(),
             ..Step::new(self.root, name, kind, argv)
@@ -305,7 +329,7 @@ impl<'r> Planner<'r> {
                     }
                 }
                 CommandAction::Tests(filter) => {
-                    let mut lane = self.test_lane(&name, &root.config.test[0], given);
+                    let mut lane = self.test_lane(&name, &root.config.test[0], Lane::Tests(given));
                     lane.argv
                         .extend([OsString::from("-E"), OsString::from(filter)]);
                     Step {
@@ -319,6 +343,9 @@ impl<'r> Planner<'r> {
                     .iter()
                     .map(|(name, value)| (name.clone(), Some(value.clone()))),
             );
+            if step.action.plain() {
+                built.errors.clone_from(&command.errors);
+            }
             built.runs = runs;
             built
         };
@@ -350,11 +377,25 @@ impl<'r> Planner<'r> {
             .collect()
     }
 
-    /// The steps of `test`: the commands that join it, then the test lanes, with `extra`.
+    /// The steps of `test`: the build of each test lane, the commands that join it, then the
+    /// test lanes, with `extra`.
     pub(crate) fn test_command(self, extra: &[String]) -> Vec<Step> {
-        let mut steps = self.joined(Joins::Test);
+        let mut steps = self.test_builds();
+        steps.extend(self.joined(Joins::Test));
         steps.extend(self.tests(extra, Runs::Always));
         steps
+    }
+
+    /// Each test lane's build, which runs no test: a test that does not compile fails here, not
+    /// in the first step that runs a test, as a command that joins `test` and runs one. It builds
+    /// in its lane's command, so the lane's step finds every unit fresh.
+    fn test_builds(self) -> Vec<Step> {
+        let sets = &self.root.config.test;
+        let lane = |(i, set): (usize, &FlagSet)| Step {
+            runs: Runs::OnInput,
+            ..self.test_lane(&numbered("build", i, sets.len()), set, Lane::Build)
+        };
+        sets.iter().enumerate().map(lane).collect()
     }
 
     /// The release build of the binaries the root ships, then each binary stripped in `out`,

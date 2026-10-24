@@ -7,16 +7,15 @@ use std::sync::Mutex;
 use serde::Deserialize;
 
 use crate::ci::Ci;
-use crate::console::Console;
+use crate::console::{Console, Stdout};
+use crate::excerpt::{Excerpt, Picker};
+use crate::failures::Failures;
 use crate::step::Kind;
 
 /// A step prints its first lines and its last: the summaries come last, nextest's list of the
 /// failed tests among them.
 const HEAD_LINES: usize = 150;
 const TAIL_LINES: usize = 50;
-/// The lines of its own a failed step shows again at the end of the run: the first ones, as a
-/// tool prints a failure's name and its first error first.
-pub(crate) const FIRST_LINES: usize = 10;
 
 /// Cargo's progress, which a step does not print.
 const PROGRESS: [&str; 15] = [
@@ -42,11 +41,10 @@ const PROGRESS: [&str; 15] = [
 pub(crate) struct Report {
     /// The exit code, `None` when a signal ended the process.
     pub(crate) code: Option<i32>,
-    /// The first lines of its own it printed, or would print outside CI: diagnostics, failures and
-    /// results, without blank lines and without the errors an earlier step printed.
-    pub(crate) first: Vec<String>,
-    /// How many such lines it had in all.
-    pub(crate) lines: usize,
+    /// Its own lines: diagnostics, failures and results, without blank lines and without the
+    /// errors an earlier step printed. A nextest run's failed tests come first, each with where
+    /// and why it panicked.
+    pub(crate) excerpt: Excerpt,
     /// The crates cargo compiled rather than found fresh, once for each unit.
     pub(crate) compiled: Vec<String>,
     pub(crate) errors: usize,
@@ -91,12 +89,15 @@ impl Report {
 }
 
 /// What a step prints: diagnostics, failures and results, not cargo's progress, and each error
-/// diagnostic once in a command. Its log holds every line but libtest's passes.
+/// diagnostic once in a command. Its log holds every line but libtest's passes. On a pipe, only a
+/// plain step prints its output, which is its result: the run's digest shows the others' lines.
 #[derive(Debug)]
 struct Filter<'s, W: Write> {
     kind: Kind,
     log: W,
     console: &'s mut Console,
+    /// It prints its output.
+    live: bool,
     /// A crate's library and its tests report one diagnostic twice.
     logged: BTreeSet<String>,
     last_blank: bool,
@@ -105,6 +106,8 @@ struct Filter<'s, W: Write> {
     tail: VecDeque<String>,
     /// The summed counts of libtest's `test result:` lines.
     results: [u64; 4],
+    failures: Failures,
+    picker: Picker<'s>,
     report: Report,
 }
 
@@ -132,17 +135,21 @@ struct Code {
 }
 
 impl<'s, W: Write> Filter<'s, W> {
-    fn new(kind: Kind, log: W, console: &'s mut Console) -> Self {
+    fn new(kind: Kind, errors: &'s [String], log: W, console: &'s mut Console) -> Self {
+        let live = kind == Kind::Plain || console.stdout() == Stdout::Terminal;
         Self {
             kind,
             log,
             console,
+            live,
             logged: BTreeSet::new(),
             last_blank: true,
             printed: 0,
             hidden: 0,
             tail: VecDeque::new(),
             results: [0; 4],
+            failures: Failures::default(),
+            picker: Picker::new(errors),
             report: Report::default(),
         }
     }
@@ -187,7 +194,11 @@ impl<'s, W: Write> Filter<'s, W> {
             add_test_result(&mut self.results, &line);
         }
         let own = summary.is_none() && !is_hidden(&line, self.kind);
-        if own {
+        if self.kind == Kind::Nextest && summary.is_some() {
+            self.failures.summary();
+        }
+        let tests = self.kind == Kind::Nextest && own && self.failures.line(&line);
+        if own && !tests {
             self.keep(&line);
         }
         if self.console.ci() == Ci::GitHub {
@@ -236,10 +247,7 @@ impl<'s, W: Write> Filter<'s, W> {
         if line.trim().is_empty() {
             return;
         }
-        if self.report.first.len() < FIRST_LINES {
-            self.report.first.push(line.to_owned());
-        }
-        self.report.lines += 1;
+        self.picker.push(line);
     }
 
     fn show(&mut self, line: &str) {
@@ -249,7 +257,7 @@ impl<'s, W: Write> Filter<'s, W> {
         }
         self.last_blank = blank;
         if self.printed < HEAD_LINES {
-            self.console.line(line);
+            self.print(line);
             self.printed += 1;
         } else {
             if self.tail.len() == TAIL_LINES {
@@ -260,18 +268,34 @@ impl<'s, W: Write> Filter<'s, W> {
         }
     }
 
+    /// Prints `line` where it is live, and keeps it for the run's output file in any case.
+    fn print(&mut self, line: &str) {
+        if self.live {
+            self.console.line(line);
+        } else {
+            self.console.record(line);
+        }
+    }
+
     fn finish(mut self, log_name: &str) -> Report {
         let omitted = self.hidden - self.tail.len();
         if omitted > 0 {
-            self.console
-                .line(&format!("... {omitted} more lines in {log_name}"));
+            self.print(&format!("... {omitted} more lines in {log_name}"));
         }
-        for line in self.tail.drain(..) {
-            self.console.line(&line);
+        for line in std::mem::take(&mut self.tail) {
+            self.print(&line);
         }
         if self.kind.libtest() {
             self.report.summary = test_summary(self.results);
         }
+        // The failed tests first: a run's other lines, as a test's output under `--no-capture`,
+        // can fill the excerpt.
+        let mut excerpt = Excerpt::default();
+        for line in self.failures.lines() {
+            excerpt.push(line);
+        }
+        excerpt.append(self.picker.finish());
+        self.report.excerpt = excerpt;
         self.log.flush().ok();
         self.report
     }
@@ -281,6 +305,8 @@ impl<'s, W: Write> Filter<'s, W> {
 #[derive(Debug)]
 pub(crate) struct Capture<'n> {
     pub(crate) kind: Kind,
+    /// Texts that mark a line of a plain step's output as an error.
+    pub(crate) errors: &'n [String],
     pub(crate) log: File,
     /// The log as a line names it.
     pub(crate) log_name: &'n str,
@@ -295,6 +321,7 @@ impl Capture<'_> {
     ) -> std::io::Result<Report> {
         let Self {
             kind,
+            errors,
             log,
             log_name,
         } = self;
@@ -305,7 +332,7 @@ impl Capture<'_> {
             .spawn()?;
         let stdout = child.stdout.take().expect("piped");
         let stderr = child.stderr.take().expect("piped");
-        let filter = Mutex::new(Filter::new(kind, BufWriter::new(log), console));
+        let filter = Mutex::new(Filter::new(kind, errors, BufWriter::new(log), console));
         std::thread::scope(|scope| {
             scope.spawn(|| {
                 for raw in BufReader::new(stdout).lines().map_while(Result::ok) {
@@ -425,10 +452,22 @@ fn test_summary([passed, failed, ignored, filtered]: [u64; 4]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::excerpt::End;
 
-    /// The report, the log, and what the console printed of this step.
+    /// The report, the log, and what the console kept of this step for the run's file.
     fn feed(
         kind: Kind,
+        console: &mut Console,
+        stdout: &[&str],
+        stderr: &[&str],
+    ) -> (Report, String, String) {
+        feed_errors(kind, &[], console, stdout, stderr)
+    }
+
+    /// [`feed`], with the step's error texts.
+    fn feed_errors(
+        kind: Kind,
+        errors: &[String],
         console: &mut Console,
         stdout: &[&str],
         stderr: &[&str],
@@ -436,7 +475,7 @@ mod tests {
         let before = console.text().len();
         let mut log = Vec::new();
         let report = {
-            let mut filter = Filter::new(kind, &mut log, console);
+            let mut filter = Filter::new(kind, errors, &mut log, console);
             for l in stdout {
                 filter.stdout(l);
             }
@@ -473,7 +512,7 @@ mod tests {
         );
         let warning = message("warning", Some("unused"), "src/c.rs:3:3: warning: unused");
         let artifact = r#"{"reason":"compiler-artifact","fresh":true}"#;
-        let mut console = Console::new(Ci::No);
+        let mut console = Console::new(Ci::No, Stdout::Terminal);
         let stdout = [
             lint.as_str(),
             lint.as_str(),
@@ -496,8 +535,7 @@ mod tests {
             report,
             Report {
                 code: None,
-                first: first.map(str::to_owned).to_vec(),
-                lines: 2,
+                excerpt: Excerpt::first(&first, 2),
                 compiled: vec!["a".to_owned(), "b".to_owned()],
                 errors: 2,
                 hard: 1,
@@ -510,8 +548,21 @@ mod tests {
 
         // A later step of the command counts the same errors but neither prints nor keeps them.
         let (again, _, printed) = feed(Kind::Check, &mut console, &[lint.as_str()], &[]);
-        assert_eq!((again.errors, again.repeated, again.lines), (1, 1, 0));
-        assert_eq!((again.first, printed), (Vec::new(), String::new()));
+        assert_eq!((again.errors, again.repeated), (1, 1));
+        assert_eq!(
+            (again.excerpt, printed),
+            (Excerpt::default(), String::new())
+        );
+
+        // On a pipe, the same lint keeps its lines for the digest and the run's file, and does
+        // not print them; a plain step's output is its result, which it prints.
+        let mut piped = Console::new(Ci::No, Stdout::Piped);
+        let mut log = Vec::new();
+        assert!(!Filter::new(Kind::Check, &[], &mut log, &mut piped).live);
+        assert!(Filter::new(Kind::Plain, &[], &mut log, &mut piped).live);
+        let (report, _, kept) = feed(Kind::Check, &mut piped, &stdout, &stderr);
+        assert_eq!((report.excerpt.total(), report.errors), (2, 2));
+        assert_eq!(kept, format!("{}\n{}\n", first[0], first[1]));
     }
 
     #[test]
@@ -545,23 +596,78 @@ mod tests {
 
     #[test]
     fn keeps_nextest_summary_and_failures() {
-        let mut console = Console::new(Ci::No);
+        let mut console = Console::new(Ci::No, Stdout::Terminal);
         let stderr = [
             "    Starting 3 tests across 2 binaries",
+            "error: a line of the run's own",
             "        FAIL [   0.010s] core tests::fails",
+            " TERMINATING [>  5.000s] core tests::waits",
+            "     TIMEOUT [   5.002s] core tests::waits",
             "──────────",
-            "     Summary [   0.020s] 3 tests run: 2 passed, 1 failed",
+            "     Summary [   5.020s] 3 tests run: 1 passed, 1 failed, 1 timed out",
+            "        SLOW [   1.100s] core tests::slow",
+            "        FAIL [   0.010s] core tests::fails",
+            "  stderr ───",
+            "    thread 'tests::fails' (7) panicked at src/lib.rs:2:5:",
+            "    wrong",
+            "",
             "error: test run failed",
         ];
         let (report, _, printed) = feed(Kind::Nextest, &mut console, &[], &stderr);
-        assert_eq!(report.summary, "3 tests run: 2 passed, 1 failed");
-        assert_eq!(report.first, ["        FAIL [   0.010s] core tests::fails"]);
-        assert_eq!(printed, "        FAIL [   0.010s] core tests::fails\n");
+        assert_eq!(
+            report.summary,
+            "3 tests run: 1 passed, 1 failed, 1 timed out"
+        );
+        // Each failure as it ended, with where and why it panicked, then the run's own lines: the
+        // notice of a timeout and the final report's repeats are not kept.
+        assert_eq!(
+            report.excerpt.lines(),
+            [
+                "FAIL [   0.010s] core tests::fails",
+                "panicked at src/lib.rs:2:5: wrong",
+                "TIMEOUT [   5.002s] core tests::waits",
+                "error: a line of the run's own",
+            ]
+        );
+        assert_eq!(report.excerpt.total(), 4);
+        // A terminal prints the run as nextest does.
+        assert!(printed.starts_with("error: a line of the run's own\n        FAIL ["));
+        assert!(printed.contains(" TERMINATING [") && printed.contains("    wrong\n"));
+    }
+
+    #[test]
+    fn a_plain_step_with_error_texts_keeps_their_lines_or_its_last() {
+        let errors = ["ERROR".to_owned(), "panicked at".to_owned()];
+        let lines: Vec<String> = (0..30).map(|i| format!("INFO line {i}")).collect();
+        let mut run: Vec<&str> = lines.iter().map(String::as_str).collect();
+        run.insert(5, "ERROR the play desynced");
+        run.push("thread 'main' panicked at src/main.rs:1:1:");
+        let mut console = Console::new(Ci::No, Stdout::Piped);
+        let (report, _, printed) = feed_errors(Kind::Plain, &errors, &mut console, &run, &[]);
+        let marked = [
+            "ERROR the play desynced",
+            "thread 'main' panicked at src/main.rs:1:1:",
+        ];
+        assert_eq!(report.excerpt, Excerpt::first(&marked, 2));
+        assert_eq!(printed.lines().count(), run.len());
+
+        // With none of them, its last lines, of all it printed.
+        let (report, _, _) = feed_errors(Kind::Plain, &errors, &mut console, &run[6..31], &[]);
+        assert_eq!(report.excerpt.end(), End::Last);
+        assert_eq!(report.excerpt.total(), 25);
+        assert_eq!(report.excerpt.lines().len(), Excerpt::LINES);
+        assert_eq!(report.excerpt.cause(), Some("INFO line 29"));
+        // Without error texts, its first lines, as before.
+        let (report, _, _) = feed(Kind::Plain, &mut console, &run[6..31], &[]);
+        assert_eq!(
+            (report.excerpt.end(), report.excerpt.cause()),
+            (End::First, Some("INFO line 5"))
+        );
     }
 
     #[test]
     fn sums_doc_tests_and_hides_their_passes() {
-        let mut console = Console::new(Ci::No);
+        let mut console = Console::new(Ci::No, Stdout::Terminal);
         let stdout = [
             "   Doc-tests core",
             "running 2 tests",
@@ -571,7 +677,7 @@ mod tests {
         ];
         let (report, log, _) = feed(Kind::Doctests, &mut console, &stdout, &[]);
         assert_eq!(report.summary, "1 passed, 1 failed");
-        assert_eq!(report.lines, 2);
+        assert_eq!(report.excerpt.total(), 2);
         // The log keeps the failure and leaves the pass out.
         assert!(log.contains("(line 9) ... FAILED"));
         assert!(!log.contains("(line 3) ... ok"));
@@ -579,7 +685,7 @@ mod tests {
 
     #[test]
     fn prints_the_head_and_the_tail() {
-        let mut console = Console::new(Ci::No);
+        let mut console = Console::new(Ci::No, Stdout::Terminal);
         let lines: Vec<String> = (0..300).map(|i| format!("line {i}")).collect();
         let lines: Vec<&str> = lines.iter().map(String::as_str).collect();
         let (report, log, printed) = feed(Kind::Plain, &mut console, &lines, &[]);
@@ -589,8 +695,11 @@ mod tests {
         assert_eq!(printed[HEAD_LINES], "... 100 more lines in x.log");
         assert_eq!(printed[HEAD_LINES + 1], "line 250");
         assert_eq!(log.lines().count(), 300);
-        assert_eq!((report.first.len(), report.lines), (FIRST_LINES, 300));
-        assert_eq!(report.first[FIRST_LINES - 1], "line 9");
+        assert_eq!(
+            (report.excerpt.lines().len(), report.excerpt.total()),
+            (Excerpt::LINES, 300)
+        );
+        assert_eq!(report.excerpt.lines()[Excerpt::LINES - 1], "line 19");
     }
 
     #[test]

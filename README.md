@@ -35,5 +35,12 @@ cargo drive surface        # the root package's public API, for a review: .notes
 ```
 
 A run ends on one line: `ok`, or `FAIL` with the failed steps and the first error, and the file
-`target/drive/last-<command>.txt` that holds all the run printed. So `cargo drive check | tail -1`
-is enough, and on a failure that file holds the rest.
+`target/drive/last-<command>.txt` that holds all of the run. Above it, each failed step shows its
+errors, or each failed test with where and why it panicked. On a terminal each step prints as it
+goes; on a pipe, as an agent reads it, only each step's line and that digest, and the output of a
+bench or a program, which is its result. So a bare `cargo drive check` prints a few lines and
+needs no `| tail`.
+
+A command of the workspace's own table can name the texts that mark an error in its output,
+`errors = ["ERROR", "panicked at"]`: a failed step of it shows those lines, or its last lines where
+none holds one.

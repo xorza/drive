@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use crate::capture::FIRST_LINES;
+use crate::excerpt::Excerpt;
 use crate::step::Step;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28,10 +28,8 @@ pub(crate) struct Outcome {
     pub(crate) status: Status,
     pub(crate) elapsed: Duration,
     pub(crate) log: Option<PathBuf>,
-    /// The first lines of its own it printed: diagnostics, failures and results.
-    pub(crate) first: Vec<String>,
-    /// How many such lines it had in all.
-    pub(crate) lines: usize,
+    /// Its own lines: diagnostics, failures and results.
+    pub(crate) excerpt: Excerpt,
     /// The time the driver spent around the step: git's trees, the step's identity, its pass.
     pub(crate) overhead: Duration,
     /// The crates cargo compiled rather than found fresh, once for each unit.
@@ -74,7 +72,7 @@ impl Outcome {
     /// Rust file that does not parse, which `unparsed` names with its error.
     pub(crate) fn listed(
         step: &Step,
-        unparsed: Vec<String>,
+        unparsed: &[String],
         out: &Path,
         elapsed: Duration,
         log: PathBuf,
@@ -90,12 +88,15 @@ impl Outcome {
                 format!("{n} Rust files do not parse; {}", out.display()),
             ),
         };
+        let mut excerpt = Excerpt::default();
+        for line in unparsed {
+            excerpt.push(line);
+        }
         Self {
             elapsed,
             log: Some(log),
-            lines: unparsed.len(),
             errors: unparsed.len(),
-            first: unparsed.into_iter().take(FIRST_LINES).collect(),
+            excerpt,
             ..Self::not_run(&step.name, status, note)
         }
     }
@@ -123,8 +124,7 @@ impl Outcome {
             status,
             elapsed: Duration::ZERO,
             log: None,
-            first: Vec::new(),
-            lines: 0,
+            excerpt: Excerpt::default(),
             overhead: Duration::ZERO,
             compiled: Vec::new(),
             errors: 0,
@@ -191,7 +191,7 @@ mod tests {
             let lines = (0..unparsed).map(|i| format!("a{i}.rs: expected identifier"));
             Outcome::listed(
                 &step,
-                lines.collect(),
+                &lines.collect::<Vec<_>>(),
                 out,
                 Duration::ZERO,
                 PathBuf::from("/w/l"),
@@ -205,17 +205,17 @@ mod tests {
             listed(1).note,
             "1 Rust file does not parse; target/drive/vocabulary.txt"
         );
-        // The digest shows the first ten again, and counts the two past them.
-        let many = listed(12);
+        // The digest shows the first twenty again, and counts the two past them.
+        let many = listed(22);
         assert_eq!(
-            (many.status, many.errors, many.lines),
-            (Status::Fail, 12, 12)
+            (many.status, many.errors, many.excerpt.total()),
+            (Status::Fail, 22, 22)
         );
-        assert_eq!(many.first.len(), FIRST_LINES);
-        assert_eq!(many.first[9], "a9.rs: expected identifier");
+        assert_eq!(many.excerpt.lines().len(), Excerpt::LINES);
+        assert_eq!(many.excerpt.lines()[19], "a19.rs: expected identifier");
         assert_eq!(
             many.note,
-            "12 Rust files do not parse; target/drive/vocabulary.txt"
+            "22 Rust files do not parse; target/drive/vocabulary.txt"
         );
         let skipped = Outcome::skipped("tests", String::new());
         assert!(!skipped.reused);

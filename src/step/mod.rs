@@ -84,6 +84,8 @@ pub(crate) struct Step {
     pub(crate) runs: Runs,
     /// What the step's line names: its flags, and the crates a narrowed run tests.
     pub(crate) label: String,
+    /// Texts that mark a line of a plain step's output as an error, its project command's.
+    pub(crate) errors: Vec<String>,
     /// The pass it shares with the other steps of its project command, which runs whole or not
     /// at all: a later step reads what an earlier one built, which a step between them, as the
     /// tests', may build over.
@@ -109,6 +111,7 @@ impl Step {
             env: vec![("RUSTDOCFLAGS".to_owned(), None)],
             runs: Runs::OnChange,
             label: String::new(),
+            errors: Vec::new(),
             shared: None,
         }
     }

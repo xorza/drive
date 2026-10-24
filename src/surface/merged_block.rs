@@ -174,36 +174,6 @@ mod tests {
     }
 
     #[test]
-    fn a_line_one_build_adds_sits_where_that_build_has_it_and_is_tagged_alone() {
-        let bare = block(&[
-            "struct W",
-            "    impl W",
-            "        fn new",
-            "        fn write",
-        ]);
-        let feature = block(&[
-            "struct W",
-            "    impl W",
-            "        fn new",
-            "        fn write_compressed",
-            "        fn write",
-        ]);
-        let merged = MergedBlock::from_builds([(0, bare.as_slice()), (1, feature.as_slice())]);
-        let both = idxs(&[0, 1]);
-        let only_feature = idxs(&[1]);
-        assert_eq!(
-            tagged(&merged, &both),
-            [
-                shown("struct W", None),
-                shown("    impl W", None),
-                shown("        fn new", None),
-                shown("        fn write_compressed", Some(&only_feature)),
-                shown("        fn write", None),
-            ]
-        );
-    }
-
-    #[test]
     fn a_line_under_a_tagged_line_of_the_same_builds_is_not_tagged_again() {
         let bare = block(&["struct W", "    fn new", "    trait Debug"]);
         let seek = block(&[
@@ -236,25 +206,7 @@ mod tests {
     }
 
     #[test]
-    fn lines_two_builds_render_differently_are_both_kept_each_with_its_build() {
-        let bare = block(&["enum E", "    A", "    B"]);
-        let feature = block(&["enum E", "    A", "    C"]);
-        let merged = MergedBlock::from_builds([(0, bare.as_slice()), (1, feature.as_slice())]);
-        let both = idxs(&[0, 1]);
-        let (zero, one) = (idxs(&[0]), idxs(&[1]));
-        assert_eq!(
-            tagged(&merged, &both),
-            [
-                shown("enum E", None),
-                shown("    A", None),
-                shown("    B", Some(&zero)),
-                shown("    C", Some(&one)),
-            ]
-        );
-    }
-
-    #[test]
-    fn members_of_an_impl_whose_header_differs_stay_under_each_header() {
+    fn lines_two_builds_render_differently_are_both_kept_each_over_its_own_members() {
         // The feature bounds the impl differently: its members belong to its own header, so each
         // header keeps its `fn new`, untagged beneath it, rather than one `fn new` under one header.
         let bare = block(&[

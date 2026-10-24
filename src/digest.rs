@@ -5,8 +5,8 @@ use crate::outcome::{Outcome, Status};
 /// The failed steps the verdict names before it counts the rest.
 const NAMED: usize = 3;
 
-/// The end of a run, for an agent that reads only its last lines: each failed step with the first
-/// lines it printed, then the verdict, which names the file that holds the whole run.
+/// The end of a run, for an agent that reads only its last lines: each failed step with its
+/// excerpt, then the verdict, which names the file that holds the whole run.
 #[derive(Debug)]
 pub(crate) struct Digest<'r> {
     /// What ran: `check`, `gate`, `run lan`.
@@ -46,16 +46,7 @@ impl Digest<'_> {
             let width = failed.iter().map(|o| o.name.len()).max().unwrap_or(0);
             for outcome in &failed {
                 lines.push(outcome.line(width, self.base));
-                lines.extend(
-                    outcome
-                        .first
-                        .iter()
-                        .map(|l| format!("  {}", l.trim_start())),
-                );
-                let more = outcome.lines - outcome.first.len();
-                if more > 0 {
-                    lines.push(format!("  … {more} more"));
-                }
+                outcome.excerpt.digest(&mut lines);
             }
         }
         lines.push(self.verdict(&failed));
@@ -92,10 +83,7 @@ impl Digest<'_> {
         } else {
             shown.join(", ")
         };
-        let cause = first
-            .first
-            .first()
-            .map_or(first.note.as_str(), |l| l.trim_start());
+        let cause = first.excerpt.cause().unwrap_or(first.note.as_str());
         let cause = if cause.is_empty() {
             "it printed nothing"
         } else {
@@ -111,6 +99,7 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
+    use crate::excerpt::Excerpt;
 
     fn step(name: &str, status: Status) -> Outcome {
         Outcome {
@@ -123,8 +112,7 @@ mod tests {
         Outcome {
             elapsed: Duration::from_millis(300),
             log: Some(PathBuf::from(format!("/w/target/drive/log/{name}.log"))),
-            first: first.iter().map(|&l| l.to_owned()).collect(),
-            lines,
+            excerpt: Excerpt::first(first, lines),
             note: note.to_owned(),
             ..step(name, Status::Fail)
         }
@@ -171,25 +159,34 @@ mod tests {
             14,
             "2 failed",
         );
+        // A program whose output holds none of its error texts shows its last lines.
+        let lan = Outcome {
+            excerpt: Excerpt::last(["exit: the server stopped".to_owned()], 9),
+            ..failed("lan", &[], 0, "exit code 1")
+        };
         let outcomes = [
             step("fmt", Status::Ok),
             lint,
             step("ship", Status::Skip),
             tests,
+            lan,
         ];
         assert_eq!(
             digest(&outcomes, None),
             [
                 "",
-                "failed: lint, tests · 1 not run · 1 passed",
+                "failed: lint, tests, lan · 1 not run · 1 passed",
                 "lint   FAIL     0.3 s  target/drive/log/lint.log  --all-features; 1 error",
                 "  src/lib.rs:2:9: error: unused variable: `unused`",
                 "tests  FAIL     0.3 s  target/drive/log/tests.log  2 failed",
                 "  FAIL [   0.003s] demo tests::adds",
                 "  FAIL [   0.003s] demo tests::plain",
                 "  … 12 more",
-                "drive gate: FAIL lint, tests — src/lib.rs:2:9: error: unused variable: `unused` \
-                 (target/drive/last-gate.txt)",
+                "lan    FAIL     0.3 s  target/drive/log/lan.log  exit code 1",
+                "  … 8 before",
+                "  exit: the server stopped",
+                "drive gate: FAIL lint, tests, lan — src/lib.rs:2:9: error: unused variable: \
+                 `unused` (target/drive/last-gate.txt)",
             ]
         );
     }
@@ -210,6 +207,17 @@ mod tests {
             digest(&[quiet], None).last().unwrap(),
             "drive gate: FAIL package — copy: No such file or directory \
              (target/drive/last-gate.txt)"
+        );
+        let ended = Outcome {
+            excerpt: Excerpt::last(
+                ["INFO a play ran".to_owned(), "the check stopped".to_owned()],
+                2,
+            ),
+            ..failed("zero-hour", &[], 0, "")
+        };
+        assert_eq!(
+            digest(&[ended], None).last().unwrap(),
+            "drive gate: FAIL zero-hour — the check stopped (target/drive/last-gate.txt)"
         );
     }
 

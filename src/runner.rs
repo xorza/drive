@@ -271,7 +271,13 @@ impl<'p> Runner<'p> {
                 drop(file);
                 std::fs::rename(&aside, &log).map_err(io(log.clone()))?;
                 let out = out.strip_prefix(&self.cx.here).unwrap_or(out);
-                return Ok(Outcome::listed(step, unparsed, out, started.elapsed(), log));
+                return Ok(Outcome::listed(
+                    step,
+                    &unparsed,
+                    out,
+                    started.elapsed(),
+                    log,
+                ));
             }
             Action::SurfaceBuild { build, json } => {
                 let started = Instant::now();
@@ -320,6 +326,7 @@ impl<'p> Runner<'p> {
             .to_string();
         let capture = Capture {
             kind: step.kind,
+            errors: &step.errors,
             log: file,
             log_name: &log_name,
         };
@@ -348,8 +355,7 @@ impl<'p> Runner<'p> {
             status,
             elapsed,
             log: Some(log),
-            first: report.first,
-            lines: report.lines,
+            excerpt: report.excerpt,
             overhead: Duration::ZERO,
             errors: report.errors,
             summary: report.summary,

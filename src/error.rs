@@ -159,6 +159,13 @@ pub(crate) enum ConfigError {
     TestsNeedNextest {
         command: String,
     },
+    EmptyErrorText {
+        command: String,
+    },
+    /// `errors` on a command with no plain step, whose diagnostics and tests the driver reads.
+    ErrorsUnread {
+        command: String,
+    },
 }
 
 impl fmt::Display for Error {
@@ -312,6 +319,15 @@ impl fmt::Display for ConfigError {
                 f,
                 "drive.commands.{command}: a `tests` step takes a nextest filter, and the root \
                  runs `cargo test`"
+            ),
+            Self::EmptyErrorText { command } => write!(
+                f,
+                "drive.commands.{command}: an error text is empty, which every line holds"
+            ),
+            Self::ErrorsUnread { command } => write!(
+                f,
+                "drive.commands.{command}: `errors` marks the lines of a `cargo` or `program` \
+                 step, and the command has none"
             ),
         }
     }

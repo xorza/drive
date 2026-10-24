@@ -50,6 +50,11 @@ fn lane_commands() {
         join(&libtest[0]),
         "test --workspace --all-features --tests --locked --message-format=json-diagnostic-short -- name"
     );
+    assert_eq!(
+        join(&keep(&cargo_test).test_command(&[])[0]),
+        "test --workspace --all-features --tests --locked --message-format=json-diagnostic-short \
+         --no-run"
+    );
 
     assert_eq!(
         join(&ci.doctests(Runs::OnChange).unwrap()),
@@ -126,7 +131,7 @@ fn command(name: &str, joins: Option<&str>, steps: &serde_json::Value) -> Projec
 fn a_project_command_s_steps() {
     let root = Root::fixture();
     let ci = keep(&root);
-    let lan = command(
+    let mut lan = command(
         "lan",
         Some("gate"),
         &serde_json::json!([
@@ -137,10 +142,14 @@ fn a_project_command_s_steps() {
             { "program": ["objcopy", "x"] },
         ]),
     );
+    lan.errors = vec!["ERROR".to_owned()];
     let args = ["out".to_owned()];
     let steps = ci.command(&lan, &args, Runs::OnInput);
     let names: Vec<&str> = steps.iter().map(|s| s.name.as_str()).collect();
     assert_eq!(names, ["lan.1", "lan.2", "lan.3", "lan.4", "lan.5"]);
+    // The error texts mark the lines of the plain steps, whose output the driver does not read.
+    let marked: Vec<bool> = steps.iter().map(|s| !s.errors.is_empty()).collect();
+    assert_eq!(marked, [false, true, true, false, true]);
     // The steps of one command share one pass, which the last keeps.
     assert!(steps.iter().all(|s| s.runs == Runs::OnInput));
     let shared: Vec<bool> = (steps.iter())
@@ -215,10 +224,22 @@ fn the_commands_that_join_test_and_gate_and_the_root_s_other_lanes() {
     root.config.cross_lint = vec!["x86_64-pc-windows-gnu".to_owned()];
     let names = |steps: Vec<Step>| -> Vec<String> { steps.into_iter().map(|s| s.name).collect() };
     let ci = keep(&root);
-    // `test` writes the index before the tests, whole once an input changed.
+    // `test` builds the tests, then writes the index before the tests, each whole once an input
+    // changed; the build is the tests' command, which runs none.
     let test = ci.test_command(&[]);
-    assert_eq!(names(test.clone()), ["index", "tests"]);
-    assert_eq!([test[0].runs, test[1].runs], [Runs::OnInput, Runs::Always]);
+    assert_eq!(names(test.clone()), ["build", "index", "tests"]);
+    assert_eq!(
+        test.iter().map(|step| step.runs).collect::<Vec<_>>(),
+        [Runs::OnInput, Runs::OnInput, Runs::Always]
+    );
+    // The tests' cargo command, less what selects and prints the tests, which nextest refuses.
+    let shape = "nextest run --workspace --all-features --locked --cargo-message-format \
+                 json-diagnostic-short";
+    assert_eq!(
+        (join(&test[0]), test[0].kind),
+        (format!("{shape} --no-run"), Kind::Check)
+    );
+    assert!(join(&test[2]).starts_with(&format!("{shape} --show-progress")));
     // A local gate lints for the other OS after the host's lanes; CI lints each OS on its own.
     let gate = ["fmt", "lint", "ship", "cross", "tests", "lan", "benches"];
     assert_eq!(names(ci.every(Sweep::Gate)), gate);

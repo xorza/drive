@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use crate::ci::Ci;
-use crate::console::Console;
+use crate::console::{Console, Stdout};
 use crate::tools::Tools;
 
 /// What every part of one run shares: the folder it runs in, its terminal, and the tools it
@@ -16,10 +16,10 @@ pub(crate) struct Context {
 }
 
 impl Context {
-    pub(crate) fn new(ci: Ci, here: PathBuf) -> Self {
+    pub(crate) fn new(ci: Ci, stdout: Stdout, here: PathBuf) -> Self {
         Self {
             here,
-            console: Console::new(ci),
+            console: Console::new(ci, stdout),
             tools: Tools::default(),
         }
     }
