@@ -237,7 +237,9 @@ impl<'r> Planner<'r> {
     }
 
     /// The benches of every member with one: each run selects the same crates, so a case
-    /// measures the same code whichever cases run.
+    /// measures the same code whichever cases run. A run with criterion's `--test`, which times
+    /// nothing and runs each case once, builds them under the test profile, as `cargo test`
+    /// builds a bench, rather than the bench profile's release LTO, a long link it would not use.
     pub(crate) fn bench(self, extra: &[String]) -> Option<Step> {
         let benches: Vec<&str> = (self.root.members.iter())
             .filter(|m| m.benches)
@@ -246,7 +248,8 @@ impl<'r> Planner<'r> {
         if benches.is_empty() {
             return None;
         }
-        let mut argv = vec!["bench"];
+        let once = extra.iter().any(|arg| arg == "--test");
+        let mut argv = vec![if once { "test" } else { "bench" }];
         argv.extend(self.lock());
         for name in benches {
             argv.extend(["-p", name]);

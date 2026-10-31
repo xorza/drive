@@ -62,7 +62,11 @@ fn lane_commands() {
     );
     assert_eq!(
         join(&ci.bench(&["--test".to_owned()]).unwrap()),
-        "bench --locked -p app --bench * -- --test"
+        "test --locked -p app --bench * -- --test"
+    );
+    assert_eq!(
+        join(&ci.bench(&["filter".to_owned()]).unwrap()),
+        "bench --locked -p app --bench * -- filter"
     );
 }
 

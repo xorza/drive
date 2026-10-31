@@ -26,7 +26,8 @@ Run it from the workspace root:
 ```
 cargo drive check          # after each change: fmt, then clippy on every target with every feature
 cargo drive test [args]    # the tests; nextest's arguments select some
-cargo drive bench [args]   # the benches; criterion's arguments select some
+cargo drive bench [args]   # the benches; criterion's arguments select some; --test runs each
+                           # once, built under the test profile
 cargo drive gate           # every check CI runs; CI adds --ci
 cargo drive run NAME       # a command of the workspace's own drive table
 cargo drive package        # the release build of the binaries the table names

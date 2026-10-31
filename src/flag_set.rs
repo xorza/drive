@@ -43,10 +43,10 @@ impl FlagSet {
                     .next()
                     .ok_or(ConfigError::FeaturesNeedsValue { key })?;
                 set.features.extend([token.to_owned(), value.to_owned()]);
-            } else if selects && matches!(token, "--lib" | "--tests" | "--bins") {
+            } else if selects && matches!(token, "--lib" | "--tests" | "--bins" | "--examples") {
                 set.targets.push(token.to_owned());
             } else if selects
-                && matches!(token, "--test" | "--bin")
+                && matches!(token, "--test" | "--bin" | "--example")
                 && let Some(name) = tokens.next()
             {
                 set.targets.extend([token.to_owned(), name.to_owned()]);
@@ -105,19 +105,26 @@ mod tests {
     #[test]
     fn splits_features_from_targets() {
         let set = parse(
-            "--lib --test alloc --features golden,gpu  --no-default-features",
+            "--lib --test alloc --example shot --features golden,gpu  --no-default-features",
             Targets::Allowed,
         );
         assert_eq!(
             set.features,
             ["--features", "golden,gpu", "--no-default-features"]
         );
-        assert_eq!(set.targets, ["--lib", "--test", "alloc"]);
+        assert_eq!(
+            set.targets,
+            ["--lib", "--test", "alloc", "--example", "shot"]
+        );
         assert_eq!(
             set.label(),
-            "--features golden,gpu --no-default-features --lib --test alloc"
+            "--features golden,gpu --no-default-features --lib --test alloc --example shot"
         );
-        assert_eq!(set.args().count(), 6);
+        assert_eq!(set.args().count(), 8);
+        assert_eq!(
+            parse("--examples", Targets::Allowed).targets,
+            ["--examples"]
+        );
 
         let empty = parse("", Targets::Refused);
         assert_eq!(empty, FlagSet::default());
